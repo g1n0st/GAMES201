@@ -27,6 +27,20 @@ rest_length = ti.var(ti.f32, shape = (max_particles, max_particles))
 # simulation paused and enter edit mode
 paused = ti.var(ti.i32, shape = ())
 
+# collide with ground
+@ti.func
+def collide_with_ground():
+    for i in range(num_particles[None]):
+        if x[i].y < bottom_y:
+            x[i].y = bottom_y
+            v[i].y = 0
+
+# compute new position
+@ti.func
+def update_position():
+    for i in range(num_particles[None]):
+        x[i] += v[i] * dt
+        
 @ti.kernel
 def new_particle(pos_x : ti.f32, pos_y : ti.f32):
     new_id = num_particles[None]

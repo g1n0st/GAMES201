@@ -17,15 +17,8 @@ def substep():
                 total_force += -stiffness[None] * (x_ij.norm() - rest_length[i, j]) * x_ij.normalized()
         v[i] += dt * total_force / particle_mass
 
-    # collide with ground
-    for i in range(n):
-        if x[i].y < bottom_y:
-            x[i].y = bottom_y
-            v[i].y = 0
-
-    # compute new position
-    for i in range(n):
-        x[i] += v[i] * dt
+    collide_with_ground()
+    update_position()
 
 init_mass_spring_system()
 
