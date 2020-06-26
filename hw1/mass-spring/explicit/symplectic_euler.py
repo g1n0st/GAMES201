@@ -1,8 +1,9 @@
 # author: g1n0st
 # Symplectic Euler Method for Mass-Spring System
 import taichi as ti
+import numpy as np
 
-ti.init(debug = True)
+ti.init(debug = False)
 
 max_particles = 256                         # the maximum number of particles
 dt = 1e-3                                   # iteration time step
@@ -65,7 +66,7 @@ def new_particle(pos_x : ti.f32, pos_y : ti.f32):
 
 @ti.kernel
 def modify_springs(pos_x : ti.f32, pos_y : ti.f32) :
-    eps = 0.01
+    eps = 0.003
 
     for i in range(num_particles[None]):
         for j in range(i):
@@ -110,9 +111,17 @@ def modify_particles(pos_x : ti.f32, pos_y : ti.f32):
         v[del_particle] = v[num_particles[None] - 1]
         num_particles[None] -= 1
 
+@ti.func
+def sigmoid(x):
+    return 2 / (1 + ti.exp(-x * 1e3)) - 1
+@ti.kernel
+def calculate_color(delta: ti.f32) -> ti.i32:
+    sigm = sigmoid(delta)
+    return int(max(sigm, 0) * 0xff) * 0x10000 - int(min(sigm, 0) * 0xff) * 0x100
+
 # initial parameter status
 stiffness[None] = 10000
-damping[None] = 20
+damping[None] = 5
 
 gui = ti.GUI('Mass-Spring System', res = (512, 512), background_color = 0xdddddd)
 
@@ -164,7 +173,8 @@ while True:
     for i in range(num_particles[None]):
         for j in range(i + 1, num_particles[None]):
             if rest_length[i, j] != 0:
-                gui.line(begin = X[i], end = X[j], radius = 2, color = 0x445566)
+                norm = np.linalg.norm(X[i] - X[j])
+                gui.line(begin = X[i], end = X[j], radius = 2, color = calculate_color(norm - rest_length[i, j]))
 
     gui.text(content=f'C: clear all; Space: pause', pos=(0, 1), color=0x0)
     gui.text(content=f'S: Spring stiffness {stiffness[None]:.1f}', pos=(0, 0.95), color=0x0)
