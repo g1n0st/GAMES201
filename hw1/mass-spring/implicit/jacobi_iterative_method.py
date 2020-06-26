@@ -15,6 +15,9 @@ F = ti.Vector(2, dt = ti.f32, shape = max_particles)
 # b = dt * F
 b = ti.Vector(2, dt = ti.f32, shape = max_particles)
 
+# jacobi iteration temp variables
+new_v = ti.Vector(2, dt = ti.f32, shape = max_particles)
+
 @ti.kernel
 def update_mass_matrix():
     m = ti.Matrix([
@@ -65,7 +68,7 @@ def update_F_vector():
 def update_b_vector():
     for i in range(num_particles[None]):
         v_star = v[i] * ti.exp(-dt * damping[None])
-        b[i] = A[i, i] @ v_star + dt * F[i]
+        b[i] = M[i, i] @ v_star + dt * F[i]
 
 # D = diag(A), E = A - D
 # Ax = b
@@ -74,25 +77,29 @@ def update_b_vector():
 @ti.kernel
 def jacobi_iteration():
     for i in range(num_particles[None]):
+        r = b[i]
         for j in range(num_particles[None]):
             if i != j:
-                b[i] -= A[i, j] @ v[j]
+                r -= A[i, j] @ v[j]
 
-        v[i] = A[i, i].inverse() @ b[i]
+        new_v[i] = A[i, i].inverse() @ r
+
+    for i in range(num_particles[None]):
+        v[i] = new_v[i]
 
 @ti.kernel
 def update_step():
     collide_with_ground()
     update_position()
 
-def substep(beta = 1.0):
+def substep(beta = 1.0, iter_times = 10):
     update_mass_matrix()
     update_jacobi_matrix()
     update_A_matrix(beta)
     update_F_vector()
     update_b_vector()
 
-    for step in range(10):
+    for step in range(iter_times):
         jacobi_iteration()
     update_step()
 
@@ -103,6 +110,6 @@ while True:
 
     if not paused[None]:
         for step in range(10):
-            substep()
+            substep(1.0, 10)
 
     process_output()
