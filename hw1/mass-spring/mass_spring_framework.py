@@ -42,18 +42,27 @@ def update_position():
         x[i] += v[i] * dt
         
 @ti.kernel
-def new_particle(pos_x : ti.f32, pos_y : ti.f32):
+def new_particle(pos_x : ti.f32, pos_y : ti.f32, mode : ti.i32):
     new_id = num_particles[None]
     num_particles[None] += 1
     x[new_id] = [pos_x, pos_y]
     v[new_id] = [0, 0]
 
-    # connect with existing particles
-    for i in range(new_id):
-        dist = (x[new_id] - x[i]).norm()
-        if dist < connection_radius:
-            rest_length[i, new_id] = dist
-            rest_length[new_id, i] = dist
+    # ('n' Mode) Add particle without connection
+    # ...
+    # (Shift Mode) Add particle connect to last added particle
+    if mode == 1 and new_id > 0:
+        dist = (x[new_id] - x[new_id - 1]).norm()
+        rest_length[new_id - 1, new_id] = dist
+        rest_length[new_id, new_id - 1] = dist
+        
+    # (Normal Mode) connect with existing particles
+    if mode == 2:
+        for i in range(new_id):
+            dist = (x[new_id] - x[i]).norm()
+            if dist < connection_radius:
+                rest_length[i, new_id] = dist
+                rest_length[new_id, i] = dist
 
 @ti.kernel
 def modify_springs(pos_x : ti.f32, pos_y : ti.f32) :
@@ -97,9 +106,13 @@ def modify_particles(pos_x : ti.f32, pos_y : ti.f32):
         for i in range(n):
             rest_length[i, del_particle] = rest_length[i, n - 1]
             rest_length[del_particle, i] = rest_length[n - 1, i]
+            rest_length[i, n - 1] = 0
+            rest_length[n - 1, i] = 0
 
         x[del_particle] = x[n - 1]
         v[del_particle] = v[n - 1]
+        x[n - 1] = [0, 0]
+        v[n - 1] = [0, 0]
         num_particles[None] -= 1
 
 # (green <-- black --> red)
@@ -117,9 +130,9 @@ def init_mass_spring_system():
     damping[None] = 5
     paused[None] = False
 
-    new_particle(0.3, 0.3)
-    new_particle(0.3, 0.4)
-    new_particle(0.4, 0.4)
+    new_particle(0.3, 0.3, 2)
+    new_particle(0.3, 0.4, 2)
+    new_particle(0.4, 0.4, 2)
 
 def process_input():
     for e in gui.get_events(ti.GUI.PRESS):
@@ -130,7 +143,12 @@ def process_input():
 
         # add particles in arbitrary state
         elif e.key == ti.GUI.LMB:
-            new_particle(e.pos[0], e.pos[1])
+            if gui.is_pressed('Shift'):
+                new_particle(e.pos[0], e.pos[1], 1)
+            else:
+                new_particle(e.pos[0], e.pos[1], 2)
+        elif e.key == 'n':
+            new_particle(e.pos[0], e.pos[1], 0)
 
         # edit particles and springs in pause state
         elif e.key == ti.GUI.RMB and paused[None]:
