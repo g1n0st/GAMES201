@@ -6,8 +6,9 @@ ti.init(arch=ti.gpu)
 quality = 1
 n_s_particles, n_w_particles, n_grid = 9000 * quality ** 2, 9000 * quality ** 2, 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
-dt = 2e-4 / quality
+dt = 2e-5 / quality
 gravity = ti.Vector([0, -9.8])
+d = 2
 
 # sand particle properties
 x_s = ti.Vector.field(2, dtype = float, shape = n_s_particles) # position
@@ -16,6 +17,7 @@ C_s = ti.Matrix.field(2, 2, dtype = float, shape = n_s_particles) # affine veloc
 F_s = ti.Matrix.field(2, 2, dtype = float, shape = n_s_particles) # deformation gradient
 c_C = ti.field(dtype = float, shape = n_s_particles) # cohesion and saturation
 c_C0 = ti.field(dtype = float, shape = n_s_particles) # initial cohesion (as maximum)
+vc_s = ti.field(dtype = float, shape = n_s_particles) # tracks changes in the log of the volume gained during extension
 
 # sand grid properties
 grid_sv = ti.Vector.field(2, dtype = float, shape = (n_grid, n_grid)) # grid node momentum/velocity
@@ -48,22 +50,35 @@ a, b, c0, sC = -3.0, 0, 1e-2, 0.15
 # The scalar function h_s is chosen so that the multiplier function is twice continuously differentiable
 @ti.func
 def h_s(z):
-    if z < 0: return 1
-    if z > 1: return 0
-    return 1 - 10 * z ** 3 + 15 * z ** 4 - 6 * z ** 5
+    ret = 0.0
+    if z < 0: ret = 1
+    if z > 1: ret = 0
+    ret = 1 - 10 * (z ** 3) + 15 * (z ** 4) - 6 * (z ** 5)
+    return ret
 
 # multiplier
+sqrt2 = ti.sqrt(2)
 @ti.func
 def h(e):
-    u = (e[0, 0] + e[1, 1]) / ti.static(ti.sqrt(2))
-    v = ti.abs(ti.Vector([e[0, 0] - u / ti.static(ti.sqrt(2)),
-                          e[1, 1] - u / ti.static(ti.sqrt(2))
-                         ]).norm())
+    u = e.trace() / sqrt2
+    v = ti.abs(ti.Vector([e[0, 0] - u / sqrt2, e[1, 1] - u / sqrt2]).norm())
     fe = c0 * (v ** 4) / (1 + v ** 3)
-    if u + fe < a + sC: return 1
-    if u + fe > b + sC: return 0
-    return h_s((u + fe - a - sC) / (b - a))
 
+    ret = 0.0
+    if u + fe < a + sC: ret = 1
+    if u + fe > b + sC: ret = 0
+    ret = h_s((u + fe - a - sC) / (b - a))
+    return ret
+
+
+@ti.func
+def project(e, cC):
+    new_e = e
+    if new_e[0, 0] > 2: new_e[0, 0] = 2
+    if new_e[0, 0] < 0: new_e[0, 0] = 0
+    if new_e[1, 1] > 2: new_e[1, 1] = 2
+    if new_e[1, 1] < 0: new_e[1, 1] = 0
+    return new_e
 @ti.kernel
 def substep():
     # set zero initial state for both water/sand grid
@@ -72,7 +87,6 @@ def substep():
         grid_sm[i, j], grid_wm[i, j] = 0, 0
         grid_sf[i, j], grid_wf[i, j] = [0, 0], [0, 0]
 
-    '''
     # P2G (sand's part)
     for p in x_s:
         base = (x_s[p] * inv_dx - 0.5).cast(int)
@@ -81,10 +95,11 @@ def substep():
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
         U, sig, V = ti.svd(F_s[p])
         inv_sig = sig.inverse()
-        ln_sig = ti.log(sig)
-        stress = U @ (2 * mu_s * inv_sig @ ln_sig +
-                lambda_s * (ln_sig[0, 0] + ln_sig[1, 1]) * inv_sig) @ V.transpose() * h(ln_sig) # formula (25)
-        stress = (-p_vol * 4 * inv_dx * inv_dx) * stress * F_s[p].transpose()
+        e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
+        stress = U @ (2 * mu_s * inv_sig @ e +
+                lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
+        stress *= (-p_vol * 4 * inv_dx * inv_dx) * stress * F_s[p].transpose()
+        # stress *= h(e)
         affine = s_mass * C_s[p]
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
@@ -93,8 +108,9 @@ def substep():
             grid_sv[base + offset] += weight * (s_mass * v_s[p] + affine @ dpos)
             grid_sm[base + offset] += weight * s_mass
             grid_sf[base + offset] += weight * stress @ dpos
-    '''
+            grid_sf[base + offset] /= 1000000
 
+    '''
     # P2G (water's part):
     for p in x_w:
         base = (x_w[p] * inv_dx - 0.5).cast(int)
@@ -103,8 +119,9 @@ def substep():
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1) ** 2, 0.5 * (fx - 0.5) ** 2]
         stress = w_k * (1 - 1 / (J_w[p] ** w_gamma))
         stress = (-p_vol * 4 * inv_dx * inv_dx) * stress * J_w[p]
-        #stress = -4 * 400 * p_vol * (J_w[p] - 1) / dx ** 2
+        # stress = -4 * 400 * p_vol * (J_w[p] - 1) / dx ** 2 (special case when gamma equals to 1)
         affine = w_mass * C_w[p]
+        # affine = ti.Matrix([[stress, 0], [0, stress]]) + w_mass * C_w[p]
         for i, j in ti.static(ti.ndrange(3, 3)):
             offset = ti.Vector([i, j])
             dpos = (offset.cast(float) - fx) * dx
@@ -112,23 +129,25 @@ def substep():
             grid_wv[base + offset] += weight * (w_mass * v_w[p] + affine @ dpos)
             grid_wm[base + offset] += weight * w_mass
             grid_wf[base + offset] += weight * stress * dpos
+    '''
 
     # Update Grids Momenta
     for i, j in grid_sm:
-        '''
         if grid_sm[i, j] > 0:
             grid_sv[i, j] = (1 / grid_sm[i, j]) * grid_sv[i, j] # Momentum to velocity
-            grid_sv[i, j] += (dt / grid_sm[i, j]) * (gravity + grid_sf[i, j]) # Update acceleration
+            grid_sv[i, j] += dt * (gravity + grid_sf[i, j] / grid_sm[i, j]) # Update acceleration
+            # grid_sv[i, j] += dt * gravity
         '''
         if grid_wm[i, j] > 0:
             grid_wv[i, j] = (1 / grid_wm[i, j]) * grid_wv[i, j]
             grid_wv[i, j] += dt * (gravity + grid_wf[i, j] / grid_wm[i, j])
-        '''
         if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
             cE = (n * n * w_rho * gravity[1]) / k_hat
             p_s = cE * (grid_wv[i, j] - grid_sv[i, j])
             grid_sv[i, j] += p_s / grid_sm[i, j]
             grid_wv[i, j] -= p_s / grid_wm[i, j]
+        '''
+
         if grid_sm[i, j] > 0:
             if i < 3 and grid_sv[i, j][0] < 0:          grid_sv[i, j][0] = 0 # Boundary conditions
             if i > n_grid - 3 and grid_sv[i, j][0] > 0: grid_sv[i, j][0] = 0
@@ -140,27 +159,42 @@ def substep():
             if i > n_grid - 3 and grid_wv[i, j][0] > 0: grid_wv[i, j][0] = 0
             if j < 3 and grid_wv[i, j][1] < 0:          grid_wv[i, j][1] = 0
             if j > n_grid - 3 and grid_wv[i, j][1] > 0: grid_wv[i, j][1] = 0
+        '''
 
-    '''
     # G2P (sand's part)
     for p in x_s:
         base = (x_s[p] * inv_dx - 0.5).cast(int)
         fx = x_s[p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
 
-        F_s[p] = (ti.Matrix.identity(float, 2) + dt * C_s[p]) @ F_s[p]
+        new_v = ti.Vector.zero(float, 2)
+        new_C = ti.Matrix.zero(float, 2, 2)
         phi = 0
         for i, j in ti.static(ti.ndrange(3, 3)): # loop over 3x3 grid node neighborhood
             dpos = ti.Vector([i, j]).cast(float) - fx
+            g_v = grid_sv[base + ti.Vector([i, j])]
             weight = w[i][0] * w[j][1]
+            new_v += weight * g_v
+            new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
                 phi += weight # formula (24)
-        c_C[p] = c_C0[p] * (1 - phi)
+        F_s[p] = (ti.Matrix.identity(float, 2) + dt * new_C) @ F_s[p]
+        v_s[p], C_s[p] = new_v, new_C
+        x_s[p] += dt * v_s[p]
 
-        # More codes for project operation ...
+        '''
+        c_C[p] = c_C0[p] * (1 - phi)
+        U, sig, V = ti.svd(F_s[p])
+        e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
+        new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p])
+        new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
+        vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
+        F_s[p] = new_F
+        '''
+
+
 
     '''
-
     # G2P (water's part)
     for p in x_w:
         base = (x_w[p] * inv_dx - 0.5).cast(int)
@@ -179,19 +213,29 @@ def substep():
         J_w[p] = (1 + dt * new_C.trace()) * J_w[p]
         v_w[p], C_w[p] = new_v, new_C
         x_w[p] += dt * v_w[p]
+    '''
 
 @ti.kernel
 def initialize():
+    '''
     for i in range(n_w_particles):
-        x_w[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.2 + 0.05 + 0.32]
+        x_w[i] = [ti.random() * 0.5 + 0.3 + 0.10, ti.random() * 0.5 + 0.05 + 0.32]
         v_w[i] = ti.Matrix([0, 0])
         J_w[i] = 1
+    '''
+    for i in range(n_s_particles):
+        x_s[i] = [ti.random() * 0.5 + 0.3 + 0.10, ti.random() * 0.5]
+        v_s[i] = ti.Matrix([0, 0])
+        F_s[i] = ti.Matrix([[1, 0], [0, 1]])
+        c_C0[i] = 0.5
+        vc_s[i] = 0
+
 
 initialize()
 gui = ti.GUI("Test", res = 512, background_color = 0x112F41)
 while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
     for s in range(50):
         substep()
-    gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
+    # gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
+    gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
     gui.show()
-    #time.sleep(1)
