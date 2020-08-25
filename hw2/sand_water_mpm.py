@@ -4,7 +4,7 @@ import time
 ti.init(arch=ti.gpu)
 
 quality = 1
-n_s_particles, n_w_particles, n_grid = 300 * quality ** 2, 9000 * quality ** 2, 128 * quality
+n_s_particles, n_w_particles, n_grid = 9000 * quality ** 2, 9000 * quality ** 2, 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 1e-4 / quality
 gravity = ti.Vector([0, -98])
@@ -72,7 +72,7 @@ def h(e):
     ret = h_s((u + fe - a - sC) / (b - a))
     return ret
 
-h0, h1, h2, h3 = 35, 0, 0.2, 10
+h0, h1, h2, h3 = 35, 9, 0.2, 10
 pi = 3.14159265358979
 @ti.func
 def project(e, cC, p):
@@ -80,12 +80,12 @@ def project(e, cC, p):
     yp = ehat.determinant() + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
     new_e = ti.Matrix.zero(float, 2, 2)
     delta_q = 0.0
-    if yp <= 0:
-        new_e = e
-        delta_q = 0
-    elif ehat.determinant() == 0 or e.trace() > 0:
+    if ehat.determinant() == 0 or e.trace() > 0:
         new_e = ti.Matrix.zero(float, 2, 2)
         delta_q = e.determinant()
+    elif yp <= 0:
+        new_e = e
+        delta_q = 0
     else:
         new_e = e - yp * ehat / ehat.determinant()
         delta_q = yp
@@ -116,13 +116,9 @@ def substep():
         U, sig, V = ti.svd(F_s[p])
         inv_sig = sig.inverse()
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        stress = U @ (2 * mu_s * inv_sig @ e + lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
+        stress = U @ ((2 * mu_s * inv_sig) @ e + lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
         stress = (-p_vol * 4 * inv_dx * inv_dx) * stress @ F_s[p].transpose()
-
-        # J = F_s[p].determinant()
-        # stress = 2 * mu_s * (F_s[p] - U @ V.transpose()) @ F_s[p].transpose() + ti.Matrix.identity(float, 2) * lambda_s * J * (J - 1)
-        # stress = (-p_vol * 4 * inv_dx * inv_dx) * stress
-        # stress *= h(e)
+        stress *= h(e)
         # print(h(e))
         affine = s_mass * C_s[p]
         for i, j in ti.static(ti.ndrange(3, 3)):
@@ -212,7 +208,6 @@ def substep():
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
         new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
         # new_e = project(e, c_C[p], p)
-        # new_e = e
         new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
         vc_s[p] += new_e.determinant() - e.determinant()
         # vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
@@ -247,13 +242,12 @@ def initialize():
         J_w[i] = 1
     '''
     for i in range(n_s_particles):
-        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.2 + 0.32]
-        v_s[i] = ti.Matrix([0, -1])
+        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.5]
+        v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
         c_C0[i] = 0.5
         vc_s[i] = 0
         alpha_s[i] = 0.3
-
 
 initialize()
 gui = ti.GUI("Test", res = 512, background_color = 0x112F41)
