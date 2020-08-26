@@ -116,7 +116,7 @@ def substep():
         U, sig, V = ti.svd(F_s[p])
         inv_sig = sig.inverse()
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        stress = U @ ((2 * mu_s * inv_sig) @ e + lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
+        stress = U @ (2 * mu_s * inv_sig @ e + lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
         stress = (-p_vol * 4 * inv_dx * inv_dx) * stress @ F_s[p].transpose()
         stress *= h(e)
         # print(h(e))
