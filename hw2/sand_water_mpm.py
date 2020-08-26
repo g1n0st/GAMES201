@@ -77,17 +77,18 @@ pi = 3.14159265358979
 @ti.func
 def project(e, cC, p):
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
-    yp = ehat.determinant() + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
+	Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
+	yp = norm_F + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
     new_e = ti.Matrix.zero(float, 2, 2)
     delta_q = 0.0
-    if ehat.determinant() == 0 or e.trace() > 0:
+    if norm_F == 0 or e.trace() > 0:
         new_e = ti.Matrix.zero(float, 2, 2)
-        delta_q = e.determinant()
+        delta_q = norm_F
     elif yp <= 0:
         new_e = e
         delta_q = 0
     else:
-        new_e = e - yp * ehat / ehat.determinant()
+        new_e = e - yp * ehat / norm_F
         delta_q = yp
     q_s[p] += delta_q
     phi = h0 + (h1 * q_s[p] - h3) * ti.exp(-h2 * q_s[p])
