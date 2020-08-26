@@ -72,24 +72,28 @@ def h(e):
     ret = h_s((u + fe - a - sC) / (b - a))
     return ret
 
+state = ti.field(dtype = int, shape = n_s_particles)
 h0, h1, h2, h3 = 35, 9, 0.2, 10
 pi = 3.14159265358979
 @ti.func
 def project(e, cC, p):
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
-	Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
-	yp = norm_F + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
+    Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
+    yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
     new_e = ti.Matrix.zero(float, 2, 2)
     delta_q = 0.0
-    if norm_F == 0 or e.trace() > 0:
+    if Fnorm == 0 or e.trace() > 0:
         new_e = ti.Matrix.zero(float, 2, 2)
-        delta_q = norm_F
+        delta_q = ti.sqrt(e[0, 0] ** 2 + e[1, 1] ** 2)
+        state[p] = 0
     elif yp <= 0:
         new_e = e
         delta_q = 0
+        state[p] = 1
     else:
-        new_e = e - yp * ehat / norm_F
+        new_e = e - yp * ehat / Fnorm
         delta_q = yp
+        state[p] = 2
     q_s[p] += delta_q
     phi = h0 + (h1 * q_s[p] - h3) * ti.exp(-h2 * q_s[p])
     phi = ti.min(pi / 2, ti.max(0, phi)) # must to do ?        
@@ -207,8 +211,8 @@ def substep():
         c_C[p] = c_C0[p] * (1 - phi)
         U, sig, V = ti.svd(F_s[p])
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
-        # new_e = project(e, c_C[p], p)
+        # new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
+        new_e = project(e, c_C[p], p)
         new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
         vc_s[p] += new_e.determinant() - e.determinant()
         # vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
@@ -248,7 +252,6 @@ def initialize():
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
         c_C0[i] = 0.5
         vc_s[i] = 0
-        alpha_s[i] = 0.3
 
 initialize()
 gui = ti.GUI("Test", res = 512, background_color = 0x112F41)
@@ -256,5 +259,7 @@ while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
     for s in range(50):
         substep()
     # gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
-    gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
+    # gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
+    colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
+    gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
     gui.show()
