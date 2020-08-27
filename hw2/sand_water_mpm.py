@@ -96,7 +96,7 @@ def project(e, cC, p):
         state[p] = 2
     q_s[p] += delta_q
     phi = h0 + (h1 * q_s[p] - h3) * ti.exp(-h2 * q_s[p])
-    phi = ti.min(pi / 2, ti.max(0, phi)) # must to do ?        
+    phi = phi / 180 * pi # details in Table. 3: Friction angle phi_F and hardening parameters h0, h1, and h3 are listed in degrees for convenience
     sin_phi = ti.sin(phi)
     alpha_s[p] = ti.sqrt(2 / 3) * (2 * sin_phi) / (3 - sin_phi)
 
@@ -123,7 +123,7 @@ def substep():
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
         stress = U @ (2 * mu_s * inv_sig @ e + lambda_s * e.trace() * inv_sig) @ V.transpose() # formula (25)
         stress = (-p_vol * 4 * inv_dx * inv_dx) * stress @ F_s[p].transpose()
-        stress *= h(e)
+        # stress *= h(e)
         # print(h(e))
         affine = s_mass * C_s[p]
         for i, j in ti.static(ti.ndrange(3, 3)):
@@ -175,8 +175,8 @@ def substep():
         if grid_sm[i, j] > 0:
             if i < 3 and grid_sv[i, j][0] < 0:          grid_sv[i, j][0] = 0 # Boundary conditions
             if i > n_grid - 3 and grid_sv[i, j][0] > 0: grid_sv[i, j][0] = 0
-            if j < 3 and grid_sv[i, j][1] < 0:          grid_sv[i, j][1] = 0
-            if j > n_grid - 3 and grid_sv[i, j][1] > 0: grid_sv[i, j][1] = 0
+            if j < 3 and grid_sv[i, j][1] < 0:          grid_sv[i, j] = ti.Vector([0, 0])
+            if j > n_grid - 3 and grid_sv[i, j][1] > 0: grid_sv[i, j] = ti.Vector([0, 0])
         '''
         if grid_wm[i, j] > 0:
             if i < 3 and grid_wv[i, j][0] < 0:          grid_wv[i, j][0] = 0 # Boundary conditions
@@ -247,19 +247,19 @@ def initialize():
         J_w[i] = 1
     '''
     for i in range(n_s_particles):
-        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.5]
+        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.5 + 0.05]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
         c_C0[i] = 0.5
-        vc_s[i] = 0
 
 initialize()
+
 gui = ti.GUI("Test", res = 512, background_color = 0x112F41)
 while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
     for s in range(50):
         substep()
     # gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
-    # gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
-    colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
-    gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
+    gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
+    # colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
+    # gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
     gui.show()
