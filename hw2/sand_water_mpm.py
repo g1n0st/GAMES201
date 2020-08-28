@@ -4,10 +4,10 @@ import time
 ti.init(arch=ti.gpu)
 
 quality = 1
-n_s_particles, n_w_particles, n_grid = 9000 * quality ** 2, 9000 * quality ** 2, 128 * quality
+n_s_particles, n_w_particles, n_grid = 5000 * quality ** 2, 5000 * quality ** 2, 128 * quality
 dx, inv_dx = 1 / n_grid, float(n_grid)
 dt = 1e-4 / quality
-gravity = ti.Vector([0, -98])
+gravity = ti.Vector([0, -9.8])
 d = 2
 
 # sand particle properties
@@ -47,7 +47,7 @@ n, k_hat = 0.4, 0.2 # sand porosity and permeability
 
 E_s, nu_s = 3.537e5, 0.3 # sand's Young's modulus and Poisson's ratio
 mu_s, lambda_s = E_s / (2 * (1 + nu_s)), E_s * nu_s / ((1 + nu_s) * (1 - 2 * nu_s)) # sand's Lame parameters
-
+# mu_s, lambda_s = 1204057.0, 836038.0
 a, b, c0, sC = -3.0, 0, 1e-2, 0.15
 # The scalar function h_s is chosen so that the multiplier function is twice continuously differentiable
 @ti.func
@@ -76,8 +76,9 @@ state = ti.field(dtype = int, shape = n_s_particles)
 h0, h1, h2, h3 = 35, 9, 0.2, 10
 pi = 3.14159265358979
 @ti.func
-def project(e0, cC, p):
-    e = e0 + cC / (2 * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
+def project(e0, p):
+    e = e0 + vc_s[p] / d * ti.Matrix.identity(float, 2) # volume correction treatment
+    e += c_C[p] / (2 * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
     Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
     yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p] # delta gamma
@@ -88,7 +89,7 @@ def project(e0, cC, p):
         delta_q = ti.sqrt(e[0, 0] ** 2 + e[1, 1] ** 2)
         state[p] = 0
     elif yp <= 0: # Case I:
-        new_e = e
+        new_e = e0 # return initial matrix without volume correction and cohesive effect
         delta_q = 0
         state[p] = 1
     else: # Case III:
@@ -158,16 +159,18 @@ def substep():
 
     # Update Grids Momenta
     for i, j in grid_sm:
-        #if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
-        #   cE = (n * n * w_rho * gravity[1]) / k_hat
-        #   p_s = cE * (grid_wv[i, j] - grid_sv[i, j])
-        #   grid_sv[i, j] += p_s / grid_wm[i, j]
-        #   grid_wv[i, j] -= p_s / grid_sm[i, j]
+        '''
+        if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
+            cE = (n * n * w_rho * gravity[1]) / k_hat
+            p_s = cE * (grid_wv[i, j] - grid_sv[i, j])
+            grid_sv[i, j] += p_s / grid_wm[i, j]
+            grid_wv[i, j] -= p_s / grid_sm[i, j]
+        '''
 
         if grid_sm[i, j] > 0:
             grid_sv[i, j] = (1 / grid_sm[i, j]) * grid_sv[i, j] # Momentum to velocity
-            grid_sv[i, j] += dt * (gravity + grid_sf[i, j] / grid_sm[i, j]) # Update acceleration
-            # grid_sv[i, j] += dt * gravity
+            grid_sv[i, j] += dt * (gravity + grid_sf[i, j] / grid_sm[i, j]) # Update explicit force
+
         if grid_wm[i, j] > 0:
             grid_wv[i, j] = (1 / grid_wm[i, j]) * grid_wv[i, j]
             grid_wv[i, j] += dt * (gravity + grid_wf[i, j] / grid_wm[i, j])
@@ -227,8 +230,7 @@ def substep():
         c_C[p] = c_C0[p] * (1 - phi)
         U, sig, V = ti.svd(F_s[p])
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        new_e = project1(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
-        # new_e = project(e, c_C[p], p)
+        new_e = project(e, p)
         new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
         # vc_s[p] += new_e.determinant() - e.determinant()
         vc_s[p] += -ti.log(new_F.determinant()) + ti.log(F_s[p].determinant())
@@ -237,15 +239,16 @@ def substep():
 @ti.kernel
 def initialize():
     for i in range(n_w_particles):
-        x_w[i] = [ti.random() * 0.314 + 0.3 + 0.10, ti.random() * 0.314 + 0.05 + 0.32]
+        x_w[i] = [ti.random() * 0.1 + 0.3 + 0.10, ti.random() * 0.6 + 0.05 + 0.32]
         v_w[i] = ti.Matrix([0, 0])
-        J_w[i] = 1
+        J_w[i] = 1.0
 
     for i in range(n_s_particles):
-        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.5 + 0.05]
+        x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.2 + 0.05]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
-        c_C0[i] = 0.4
+        c_C0[i] = -0.4
+        alpha_s[i] = 0.267765
 
 initialize()
 
@@ -255,6 +258,6 @@ while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
         substep()
     gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
     gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
-    # colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
-    # gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
+    #colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
+    #gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
     gui.show()
