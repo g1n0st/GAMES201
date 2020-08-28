@@ -76,24 +76,27 @@ state = ti.field(dtype = int, shape = n_s_particles)
 h0, h1, h2, h3 = 35, 9, 0.2, 10
 pi = 3.14159265358979
 @ti.func
-def project(e, cC, p):
+def project(e0, cC, p):
+    e = e0 + cC / (2 * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
     Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
-    yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
+    yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p] # delta gamma
     new_e = ti.Matrix.zero(float, 2, 2)
     delta_q = 0.0
-    if Fnorm == cC or e.trace() > cC:
+    if Fnorm <= 0 or e.trace() > 0: # Case II:
         new_e = ti.Matrix.zero(float, 2, 2)
         delta_q = ti.sqrt(e[0, 0] ** 2 + e[1, 1] ** 2)
         state[p] = 0
-    elif yp <= cC:
+    elif yp <= 0: # Case I:
         new_e = e
         delta_q = 0
         state[p] = 1
-    else:
-        new_e = e - yp * ehat / Fnorm
+    else: # Case III:
+        new_e = e - yp / Fnorm * ehat
         delta_q = yp
         state[p] = 2
+
+    # Hardening
     q_s[p] += delta_q
     phi = h0 + (h1 * q_s[p] - h3) * ti.exp(-h2 * q_s[p])
     phi = phi / 180 * pi # details in Table. 3: Friction angle phi_F and hardening parameters h0, h1, and h3 are listed in degrees for convenience
