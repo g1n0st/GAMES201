@@ -224,12 +224,11 @@ def substep():
         c_C[p] = c_C0[p] * (1 - phi)
         U, sig, V = ti.svd(F_s[p])
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
-        # print(vc_s[p])
+        new_e = project1(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
         # new_e = project(e, c_C[p], p)
         new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
         # vc_s[p] += new_e.determinant() - e.determinant()
-        # vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
+        vc_s[p] += -ti.log(new_F.determinant()) + ti.log(F_s[p].determinant())
         F_s[p] = new_F
 
 @ti.kernel
