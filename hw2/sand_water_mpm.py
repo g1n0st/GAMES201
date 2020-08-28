@@ -82,11 +82,11 @@ def project(e, cC, p):
     yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p]
     new_e = ti.Matrix.zero(float, 2, 2)
     delta_q = 0.0
-    if Fnorm == 0 or e.trace() > 0:
+    if Fnorm == cC or e.trace() > cC:
         new_e = ti.Matrix.zero(float, 2, 2)
         delta_q = ti.sqrt(e[0, 0] ** 2 + e[1, 1] ** 2)
         state[p] = 0
-    elif yp <= 0:
+    elif yp <= cC:
         new_e = e
         delta_q = 0
         state[p] = 1
@@ -134,7 +134,6 @@ def substep():
             grid_sm[base + offset] += weight * s_mass
             grid_sf[base + offset] += weight * stress @ dpos
 
-    '''
     # P2G (water's part):
     for p in x_w:
         base = (x_w[p] * inv_dx - 0.5).cast(int)
@@ -153,73 +152,35 @@ def substep():
             grid_wv[base + offset] += weight * (w_mass * v_w[p] + affine @ dpos)
             grid_wm[base + offset] += weight * w_mass
             grid_wf[base + offset] += weight * stress * dpos
-    '''
 
     # Update Grids Momenta
     for i, j in grid_sm:
+        #if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
+        #   cE = (n * n * w_rho * gravity[1]) / k_hat
+        #   p_s = cE * (grid_wv[i, j] - grid_sv[i, j])
+        #   grid_sv[i, j] += p_s / grid_wm[i, j]
+        #   grid_wv[i, j] -= p_s / grid_sm[i, j]
+
         if grid_sm[i, j] > 0:
             grid_sv[i, j] = (1 / grid_sm[i, j]) * grid_sv[i, j] # Momentum to velocity
             grid_sv[i, j] += dt * (gravity + grid_sf[i, j] / grid_sm[i, j]) # Update acceleration
             # grid_sv[i, j] += dt * gravity
-        '''
         if grid_wm[i, j] > 0:
             grid_wv[i, j] = (1 / grid_wm[i, j]) * grid_wv[i, j]
             grid_wv[i, j] += dt * (gravity + grid_wf[i, j] / grid_wm[i, j])
-        if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
-            cE = (n * n * w_rho * gravity[1]) / k_hat
-            p_s = cE * (grid_wv[i, j] - grid_sv[i, j])
-            grid_sv[i, j] += p_s / grid_sm[i, j]
-            grid_wv[i, j] -= p_s / grid_wm[i, j]
-        '''
 
         if grid_sm[i, j] > 0:
             if i < 3 and grid_sv[i, j][0] < 0:          grid_sv[i, j][0] = 0 # Boundary conditions
             if i > n_grid - 3 and grid_sv[i, j][0] > 0: grid_sv[i, j][0] = 0
             if j < 3 and grid_sv[i, j][1] < 0:          grid_sv[i, j] = ti.Vector([0, 0])
             if j > n_grid - 3 and grid_sv[i, j][1] > 0: grid_sv[i, j] = ti.Vector([0, 0])
-        '''
+
         if grid_wm[i, j] > 0:
             if i < 3 and grid_wv[i, j][0] < 0:          grid_wv[i, j][0] = 0 # Boundary conditions
             if i > n_grid - 3 and grid_wv[i, j][0] > 0: grid_wv[i, j][0] = 0
             if j < 3 and grid_wv[i, j][1] < 0:          grid_wv[i, j][1] = 0
             if j > n_grid - 3 and grid_wv[i, j][1] > 0: grid_wv[i, j][1] = 0
-        '''
 
-    # G2P (sand's part)
-    for p in x_s:
-        base = (x_s[p] * inv_dx - 0.5).cast(int)
-        if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2:
-            continue
-        fx = x_s[p] * inv_dx - base.cast(float)
-        w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
-        new_v = ti.Vector.zero(float, 2)
-        new_C = ti.Matrix.zero(float, 2, 2)
-        phi = 0
-        for i, j in ti.static(ti.ndrange(3, 3)): # loop over 3x3 grid node neighborhood
-            dpos = ti.Vector([i, j]).cast(float) - fx
-            g_v = grid_sv[base + ti.Vector([i, j])]
-            weight = w[i][0] * w[j][1]
-            new_v += weight * g_v
-            new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
-            if grid_sm[i, j] > 0 and grid_wm[i, j] > 0:
-                phi += weight # formula (24)
-
-        F_s[p] = (ti.Matrix.identity(float, 2) + dt * new_C) @ F_s[p]
-        v_s[p], C_s[p] = new_v, new_C
-        x_s[p] += dt * v_s[p]
-
-        c_C[p] = c_C0[p] * (1 - phi)
-        U, sig, V = ti.svd(F_s[p])
-        e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
-        # new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
-        new_e = project(e, c_C[p], p)
-        new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
-        vc_s[p] += new_e.determinant() - e.determinant()
-        # vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
-        F_s[p] = new_F
-
-
-    '''
     # G2P (water's part)
     for p in x_w:
         base = (x_w[p] * inv_dx - 0.5).cast(int)
@@ -236,21 +197,53 @@ def substep():
         J_w[p] = (1 + dt * new_C.trace()) * J_w[p]
         v_w[p], C_w[p] = new_v, new_C
         x_w[p] += dt * v_w[p]
-    '''
+
+    # G2P (sand's part)
+    for p in x_s:
+        base = (x_s[p] * inv_dx - 0.5).cast(int)
+        if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2:
+            continue
+        fx = x_s[p] * inv_dx - base.cast(float)
+        w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
+        new_v = ti.Vector.zero(float, 2)
+        new_C = ti.Matrix.zero(float, 2, 2)
+        phi = 0.0
+        for i, j in ti.static(ti.ndrange(3, 3)): # loop over 3x3 grid node neighborhood
+            dpos = ti.Vector([i, j]).cast(float) - fx
+            g_v = grid_sv[base + ti.Vector([i, j])]
+            weight = w[i][0] * w[j][1]
+            new_v += weight * g_v
+            new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
+            if grid_sm[base + ti.Vector([i, j])] > 0 and grid_wm[base + ti.Vector([i, j])] > 0:
+                phi += weight # formula (24)
+
+        F_s[p] = (ti.Matrix.identity(float, 2) + dt * new_C) @ F_s[p]
+        v_s[p], C_s[p] = new_v, new_C
+        x_s[p] += dt * v_s[p]
+
+        c_C[p] = c_C0[p] * (1 - phi)
+        U, sig, V = ti.svd(F_s[p])
+        e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
+        new_e = project(e + vc_s[p] / d * ti.Matrix.identity(float, 2), c_C[p], p)
+        # print(vc_s[p])
+        # new_e = project(e, c_C[p], p)
+        new_F = U @ ti.Matrix([[ti.exp(new_e[0, 0]), 0], [0, ti.exp(new_e[1, 1])]]) @ V.transpose()
+        # vc_s[p] += new_e.determinant() - e.determinant()
+        # vc_s[p] += ti.log(new_F.determinant()) - ti.log(F_s[p].determinant())
+        F_s[p] = new_F
 
 @ti.kernel
 def initialize():
-    '''
     for i in range(n_w_particles):
-        x_w[i] = [ti.random() * 0.5 + 0.3 + 0.10, ti.random() * 0.5 + 0.05 + 0.32]
+        x_w[i] = [ti.random() * 0.314 + 0.3 + 0.10, ti.random() * 0.314 + 0.05 + 0.32]
         v_w[i] = ti.Matrix([0, 0])
         J_w[i] = 1
-    '''
+
     for i in range(n_s_particles):
         x_s[i] = [ti.random() * 0.2 + 0.3 + 0.10, ti.random() * 0.5 + 0.05]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
-        c_C0[i] = 0.5
+        c_C0[i] = 0.4
 
 initialize()
 
@@ -258,7 +251,7 @@ gui = ti.GUI("Test", res = 512, background_color = 0x112F41)
 while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
     for s in range(50):
         substep()
-    # gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
+    gui.circles(x_w.to_numpy(), radius=1.5, color = 0x068587)
     gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
     # colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
     # gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
