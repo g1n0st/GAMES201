@@ -50,7 +50,9 @@ n, k_hat = 0.4, 0.2 # sand porosity and permeability
 
 E_s, nu_s = 3.537e5, 0.3 # sand's Young's modulus and Poisson's ratio
 mu_s, lambda_s = E_s / (2 * (1 + nu_s)), E_s * nu_s / ((1 + nu_s) * (1 - 2 * nu_s)) # sand's Lame parameters
-# mu_s, lambda_s = 1204057.0, 836038.0
+
+mu_b = 0.75 # coefficient of friction
+
 a, b, c0, sC = -3.0, 0, 1e-2, 0.15
 # The scalar function h_s is chosen so that the multiplier function is twice continuously differentiable
 @ti.func
@@ -190,11 +192,19 @@ def substep():
         elif grid_wm[i, j] > 0:
             grid_wv[i, j] += dt * (gravity + grid_wf[i, j] / grid_wm[i, j])
 
+        normal = ti.Vector.zero(float, 2)
         if grid_sm[i, j] > 0:
-            if i < 3 and grid_sv[i, j][0] < 0:          grid_sv[i, j][0] = 0 # Boundary conditions
-            if i > n_grid - 3 and grid_sv[i, j][0] > 0: grid_sv[i, j][0] = 0
-            if j < 3 and grid_sv[i, j][1] < 0:          grid_sv[i, j] = ti.Vector([0, 0])
-            if j > n_grid - 3 and grid_sv[i, j][1] > 0: grid_sv[i, j] = ti.Vector([0, 0])
+            if i < 3 and grid_sv[i, j][0] < 0:          normal = ti.Vector([1, 0])
+            if i > n_grid - 3 and grid_sv[i, j][0] > 0: normal = ti.Vector([-1, 0])
+            if j < 3 and grid_sv[i, j][1] < 0:          normal = ti.Vector([0, 1])
+            if j > n_grid - 3 and grid_sv[i, j][1] > 0: normal = ti.Vector([0, -1])
+        if not (normal[0] == 0 and normal[1] == 0): # Apply friction
+            s = grid_sv[i, j].dot(normal)
+            if s <= 0:
+                v_normal = s * normal
+                v_tangent = grid_sv[i, j] - v_normal # divide velocity into normal and tangential parts
+                vt = v_tangent.norm()
+                if vt > 1e-12: grid_sv[i, j] = v_tangent - (vt if vt < -mu_b * s else -mu_b * s) * (v_tangent / vt) # The Coulomb friction law
 
         if grid_wm[i, j] > 0:
             if i < 3 and grid_wv[i, j][0] < 0:          grid_wv[i, j][0] = 0 # Boundary conditions
@@ -257,7 +267,7 @@ def initialize():
         x_s[i] = [ti.random() * 0.25 + 0.4, ti.random() * 0.4 + 0.01]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
-        c_C0[i] = -0.008
+        c_C0[i] = -0.01
         alpha_s[i] = 0.267765
 
     n_w_particles[None] = 0
@@ -306,5 +316,6 @@ while True:
         update_color()
         gui.circles(x_w.to_numpy(), radius = 1.5, color = color_w.to_numpy())
         gui.circles(x_s.to_numpy(), radius = 1.5, color = color_s.to_numpy())
-    gui.show(f'{frame:06d}.png')
+    # gui.show(f'{frame:06d}.png')
+    gui.show()
     frame += 1
