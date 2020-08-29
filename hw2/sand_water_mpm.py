@@ -4,7 +4,7 @@ import time
 ti.init(arch=ti.gpu)
 
 quality = 1
-n_particles = 40000 * quality ** 2
+n_particles = 20000 * quality ** 2
 n_s_particles = ti.field(dtype = int, shape = ())
 n_w_particles = ti.field(dtype = int, shape = ())
 n_grid = 128 * quality
@@ -18,7 +18,7 @@ x_s = ti.Vector.field(2, dtype = float, shape = n_particles) # position
 v_s = ti.Vector.field(2, dtype = float, shape = n_particles) # velocity
 C_s = ti.Matrix.field(2, 2, dtype = float, shape = n_particles) # affine velocity matrix
 F_s = ti.Matrix.field(2, 2, dtype = float, shape = n_particles) # deformation gradient
-c_C = ti.field(dtype = float, shape = n_particles) # cohesion and saturation
+phi_s = ti.field(dtype = float, shape = n_particles) # cohesion and saturation
 c_C0 = ti.field(dtype = float, shape = n_particles) # initial cohesion (as maximum)
 vc_s = ti.field(dtype = float, shape = n_particles) # tracks changes in the log of the volume gained during extension
 alpha_s = ti.field(dtype = float, shape = n_particles) # yield surface size
@@ -80,7 +80,7 @@ pi = 3.14159265358979
 @ti.func
 def project(e0, p):
     e = e0 + vc_s[p] / d * ti.Matrix.identity(float, 2) # volume correction treatment
-    e += c_C[p] / (d * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
+    e += (c_C0[p] * (1.0 - phi_s[p])) / (d * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
     Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
     yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p] # delta gamma
@@ -228,7 +228,7 @@ def substep():
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
         new_v = ti.Vector.zero(float, 2)
         new_C = ti.Matrix.zero(float, 2, 2)
-        phi = 0.0 # Saturation
+        phi_s[p] = 0.0 # Saturation
         for i, j in ti.static(ti.ndrange(3, 3)): # loop over 3x3 grid node neighborhood
             dpos = ti.Vector([i, j]).cast(float) - fx
             g_v = grid_sv[base + ti.Vector([i, j])]
@@ -236,13 +236,12 @@ def substep():
             new_v += weight * g_v
             new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             if grid_sm[base + ti.Vector([i, j])] > 0 and grid_wm[base + ti.Vector([i, j])] > 0:
-                phi += weight # formula (24)
+                phi_s[p] += weight # formula (24)
 
         F_s[p] = (ti.Matrix.identity(float, 2) + dt * new_C) @ F_s[p]
         v_s[p], C_s[p] = new_v, new_C
         x_s[p] += dt * v_s[p]
 
-        c_C[p] = c_C0[p] * (1 - phi)
         U, sig, V = ti.svd(F_s[p])
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
         new_e, dq = project(e, p)
@@ -265,7 +264,7 @@ def initialize():
 
 @ti.kernel
 def update_jet():
-    if n_w_particles < 30000:
+    if n_w_particles < 20000 - 50:
         for i in range(n_w_particles, n_w_particles + 50):
             x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + 0.5]
             v_w[i] = ti.Matrix([-1.5, 0])
@@ -273,15 +272,39 @@ def update_jet():
 
         n_w_particles[None] += 50
 
+@ti.func
+def color_lerp(r1, g1, b1, r2, g2, b2, t):
+    return int((r1 * (1 - t) + r2 * t) * 0x100) * 0x10000 + int((g1 * (1 - t) + g2 * t) * 0x100) * 0x100 + int((b1 * (1 - t) + b2 * t) * 0x100)
+
+color_s = ti.field(dtype = int, shape = n_particles)
+color_w = ti.field(dtype = int, shape = n_particles)
+@ti.kernel
+def update_color():
+    for i in range(n_s_particles):
+        color_s[i] = color_lerp(0.521, 0.368, 0.259, 0.318, 0.223, 0.157, phi_s[i])
+    for i in range(n_w_particles):
+        color_w[i] = color_lerp(0.2, 0.231, 0.792, 0.867, 0.886, 0.886, v_w[i].norm() / 3.0)
+
 initialize()
 
+project_view = False
+frame = 0
 gui = ti.GUI("2D Dam", res = 512, background_color = 0xFFFFFF)
-while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
+while True:
+    for e in gui.get_events(ti.GUI.PRESS):
+        if e.key == gui.SPACE: project_view = not project_view
+        elif e.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
+            exit()
     update_jet()
     for s in range(50):
         substep()
-    gui.circles(x_w.to_numpy(), radius = 1.5, color = 0x068587)
-    gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
-    # colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
-    # gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
-    gui.show()
+    if project_view:
+        gui.circles(x_w.to_numpy(), radius = 1.5, color = 0x068587)
+        colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
+        gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
+    else:
+        update_color()
+        gui.circles(x_w.to_numpy(), radius = 1.5, color = color_w.to_numpy())
+        gui.circles(x_s.to_numpy(), radius = 1.5, color = color_s.to_numpy())
+    gui.show(f'{frame:06d}.png')
+    frame += 1
