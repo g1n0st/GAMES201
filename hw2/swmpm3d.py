@@ -1,7 +1,7 @@
 import taichi as ti
 import numpy as np
 import time
-ti.init(arch=ti.cpu)
+ti.init(arch=ti.gpu)
 
 quality = 1
 n_particles = 20000 * quality ** 3
@@ -277,7 +277,7 @@ def initialize():
 def update_jet():
     if n_w_particles[None] < 20000 - 50:
         for i in range(n_w_particles[None], n_w_particles[None] + 50):
-            x_w[i] = [ti.random() * 0.03 + 0.92, 0, ti.random() * 0.03 + 0.5]
+            x_w[i] = [ti.random() * 0.03 + 0.92, 0.485 + ti.random() * 0.03, ti.random() * 0.03 + 0.5]
             v_w[i] = ti.Matrix([-1.5, 0, 0])
             J_w[i] = 1
 
@@ -301,11 +301,11 @@ pos_w = ti.Vector.field(2, dtype = float, shape = n_particles)
 @ti.kernel
 def update_pos():
     for i in range(n_s_particles[None]):
-        # pos_s[i] = ti.Vector([x_s[i][0], x_s[i][2]])
-        pos_s[i] = ti.Vector([x_s[i][0], x_s[i][1]])
+        pos_s[i] = ti.Vector([x_s[i][0], x_s[i][2]])
+        # pos_s[i] = ti.Vector([x_s[i][0], x_s[i][1]])
     for i in range(n_w_particles[None]):
-        # pos_w[i] = ti.Vector([x_w[i][0], x_w[i][2]])
-        pos_w[i] = ti.Vector([x_w[i][0], x_w[i][1]])
+        pos_w[i] = ti.Vector([x_w[i][0], x_w[i][2]])
+        # pos_w[i] = ti.Vector([x_w[i][0], x_w[i][1]])
 initialize()
 
 project_view = False
