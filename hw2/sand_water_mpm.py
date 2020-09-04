@@ -4,7 +4,7 @@ import time
 ti.init(arch=ti.gpu)
 
 quality = 1
-n_particles = 40000 * quality ** 2
+n_particles = 20000 * quality ** 2
 n_s_particles = ti.field(dtype = int, shape = ())
 n_w_particles = ti.field(dtype = int, shape = ())
 n_grid = 128 * quality
@@ -18,7 +18,7 @@ x_s = ti.Vector.field(2, dtype = float, shape = n_particles) # position
 v_s = ti.Vector.field(2, dtype = float, shape = n_particles) # velocity
 C_s = ti.Matrix.field(2, 2, dtype = float, shape = n_particles) # affine velocity matrix
 F_s = ti.Matrix.field(2, 2, dtype = float, shape = n_particles) # deformation gradient
-c_C = ti.field(dtype = float, shape = n_particles) # cohesion and saturation
+phi_s = ti.field(dtype = float, shape = n_particles) # cohesion and saturation
 c_C0 = ti.field(dtype = float, shape = n_particles) # initial cohesion (as maximum)
 vc_s = ti.field(dtype = float, shape = n_particles) # tracks changes in the log of the volume gained during extension
 alpha_s = ti.field(dtype = float, shape = n_particles) # yield surface size
@@ -50,7 +50,9 @@ n, k_hat = 0.4, 0.2 # sand porosity and permeability
 
 E_s, nu_s = 3.537e5, 0.3 # sand's Young's modulus and Poisson's ratio
 mu_s, lambda_s = E_s / (2 * (1 + nu_s)), E_s * nu_s / ((1 + nu_s) * (1 - 2 * nu_s)) # sand's Lame parameters
-# mu_s, lambda_s = 1204057.0, 836038.0
+
+mu_b = 0.75 # coefficient of friction
+
 a, b, c0, sC = -3.0, 0, 1e-2, 0.15
 # The scalar function h_s is chosen so that the multiplier function is twice continuously differentiable
 @ti.func
@@ -80,7 +82,7 @@ pi = 3.14159265358979
 @ti.func
 def project(e0, p):
     e = e0 + vc_s[p] / d * ti.Matrix.identity(float, 2) # volume correction treatment
-    e += c_C[p] / (d * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
+    e += (c_C0[p] * (1.0 - phi_s[p])) / (d * alpha_s[p]) * ti.Matrix.identity(float, 2) # effects of cohesion
     ehat = e - e.trace() / d * ti.Matrix.identity(float, 2)
     Fnorm = ti.sqrt(ehat[0, 0] ** 2 + ehat[1, 1] ** 2) # Frobenius norm
     yp = Fnorm + (d * lambda_s + 2 * mu_s) / (2 * mu_s) * e.trace() * alpha_s[p] # delta gamma
@@ -190,11 +192,19 @@ def substep():
         elif grid_wm[i, j] > 0:
             grid_wv[i, j] += dt * (gravity + grid_wf[i, j] / grid_wm[i, j])
 
+        normal = ti.Vector.zero(float, 2)
         if grid_sm[i, j] > 0:
-            if i < 3 and grid_sv[i, j][0] < 0:          grid_sv[i, j][0] = 0 # Boundary conditions
-            if i > n_grid - 3 and grid_sv[i, j][0] > 0: grid_sv[i, j][0] = 0
-            if j < 3 and grid_sv[i, j][1] < 0:          grid_sv[i, j] = ti.Vector([0, 0])
-            if j > n_grid - 3 and grid_sv[i, j][1] > 0: grid_sv[i, j] = ti.Vector([0, 0])
+            if i < 3 and grid_sv[i, j][0] < 0:          normal = ti.Vector([1, 0])
+            if i > n_grid - 3 and grid_sv[i, j][0] > 0: normal = ti.Vector([-1, 0])
+            if j < 3 and grid_sv[i, j][1] < 0:          normal = ti.Vector([0, 1])
+            if j > n_grid - 3 and grid_sv[i, j][1] > 0: normal = ti.Vector([0, -1])
+        if not (normal[0] == 0 and normal[1] == 0): # Apply friction
+            s = grid_sv[i, j].dot(normal)
+            if s <= 0:
+                v_normal = s * normal
+                v_tangent = grid_sv[i, j] - v_normal # divide velocity into normal and tangential parts
+                vt = v_tangent.norm()
+                if vt > 1e-12: grid_sv[i, j] = v_tangent - (vt if vt < -mu_b * s else -mu_b * s) * (v_tangent / vt) # The Coulomb friction law
 
         if grid_wm[i, j] > 0:
             if i < 3 and grid_wv[i, j][0] < 0:          grid_wv[i, j][0] = 0 # Boundary conditions
@@ -228,7 +238,7 @@ def substep():
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
         new_v = ti.Vector.zero(float, 2)
         new_C = ti.Matrix.zero(float, 2, 2)
-        phi = 0.0 # Saturation
+        phi_s[p] = 0.0 # Saturation
         for i, j in ti.static(ti.ndrange(3, 3)): # loop over 3x3 grid node neighborhood
             dpos = ti.Vector([i, j]).cast(float) - fx
             g_v = grid_sv[base + ti.Vector([i, j])]
@@ -236,13 +246,12 @@ def substep():
             new_v += weight * g_v
             new_C += 4 * inv_dx * weight * g_v.outer_product(dpos)
             if grid_sm[base + ti.Vector([i, j])] > 0 and grid_wm[base + ti.Vector([i, j])] > 0:
-                phi += weight # formula (24)
+                phi_s[p] += weight # formula (24)
 
         F_s[p] = (ti.Matrix.identity(float, 2) + dt * new_C) @ F_s[p]
         v_s[p], C_s[p] = new_v, new_C
         x_s[p] += dt * v_s[p]
 
-        c_C[p] = c_C0[p] * (1 - phi)
         U, sig, V = ti.svd(F_s[p])
         e = ti.Matrix([[ti.log(sig[0, 0]), 0], [0, ti.log(sig[1, 1])]])
         new_e, dq = project(e, p)
@@ -258,30 +267,82 @@ def initialize():
         x_s[i] = [ti.random() * 0.25 + 0.4, ti.random() * 0.4 + 0.01]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
-        c_C0[i] = -0.008
+        c_C0[i] = -0.01
         alpha_s[i] = 0.267765
 
+    pos_y[None] = 0.5
     n_w_particles[None] = 0
 
+pos_y = ti.field(dtype = float, shape = ())
 @ti.kernel
 def update_jet():
-    if n_w_particles < 30000:
+    if n_w_particles < 20000 - 50:
         for i in range(n_w_particles, n_w_particles + 50):
-            x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + 0.5]
+            x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + pos_y[None]]
             v_w[i] = ti.Matrix([-1.5, 0])
             J_w[i] = 1
 
         n_w_particles[None] += 50
 
+# add a new sand block with mouse position
+@ti.kernel
+def add_block(x : ti.f32):
+    if n_s_particles < 40000 - 1000:
+        for i in range(n_s_particles, n_s_particles + 1000):
+            x_s[i] = [ti.min(0.87, x) + ti.random() * 0.1, ti.random() * 0.1 + 0.87]
+            v_s[i] = ti.Matrix([0, -0.25])
+            F_s[i] = ti.Matrix([[1, 0], [0, 1]])
+            c_C0[i] = -0.01
+            alpha_s[i] = 0.267765
+
+    n_s_particles += 1000
+
+@ti.func
+def color_lerp(r1, g1, b1, r2, g2, b2, t):
+    return int((r1 * (1 - t) + r2 * t) * 0x100) * 0x10000 + int((g1 * (1 - t) + g2 * t) * 0x100) * 0x100 + int((b1 * (1 - t) + b2 * t) * 0x100)
+
+# show different color for different cohesion of sand and different velocity of water
+color_s = ti.field(dtype = int, shape = n_particles)
+color_w = ti.field(dtype = int, shape = n_particles)
+@ti.kernel
+def update_color():
+    for i in range(n_s_particles):
+        color_s[i] = color_lerp(0.521, 0.368, 0.259, 0.318, 0.223, 0.157, phi_s[i])
+    for i in range(n_w_particles):
+        color_w[i] = color_lerp(0.2, 0.231, 0.792, 0.867, 0.886, 0.886, v_w[i].norm() / 7.0)
+
 initialize()
 
+project_view = False
+frame = 0
 gui = ti.GUI("2D Dam", res = 512, background_color = 0xFFFFFF)
-while not gui.get_event(ti.GUI.ESCAPE, ti.GUI.EXIT):
+while True:
+    # show hints
+    gui.text(content = f'w/s to move jet upward and downward', pos = (0, 0.99), color = 0x111111)
+    gui.text(content = f'left mouse click to add new porous sand block', pos = (0, 0.96), color = 0x111111)
+    gui.text(content = f'space to switch normal/project-operation-state view', pos = (0, 0.93), color = 0x111111)
+    # process input
+    for e in gui.get_events(ti.GUI.PRESS):
+        if e.key == gui.SPACE: project_view = not project_view
+        elif e.key == 'w': pos_y[None] += 0.01 # move jet upward
+        elif e.key == 's': pos_y[None] -= 0.01 # move jet downward
+        elif e.key == ti.GUI.LMB: add_block(e.pos[0])
+        elif e.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
+            exit()
+
     update_jet()
     for s in range(50):
         substep()
-    gui.circles(x_w.to_numpy(), radius = 1.5, color = 0x068587)
-    gui.circles(x_s.to_numpy(), radius = 1.5, color = 0x855E42)
-    # colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
-    # gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
+
+    # project-operation-state view
+    if project_view:
+        gui.circles(x_w.to_numpy(), radius = 1.5, color = 0x068587)
+        colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
+        gui.circles(x_s.to_numpy(), radius = 1.5, color = colors[state.to_numpy()])
+    else:
+        update_color()
+        gui.circles(x_w.to_numpy(), radius = 1.5, color = color_w.to_numpy())
+        gui.circles(x_s.to_numpy(), radius = 1.5, color = color_s.to_numpy())
+    # gui.show(f'{frame:06d}.png')
     gui.show()
+    frame += 1
