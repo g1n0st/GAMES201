@@ -270,22 +270,38 @@ def initialize():
         c_C0[i] = -0.01
         alpha_s[i] = 0.267765
 
+    pos_y[None] = 0.5
     n_w_particles[None] = 0
 
+pos_y = ti.field(dtype = float, shape = ())
 @ti.kernel
 def update_jet():
     if n_w_particles < 20000 - 50:
         for i in range(n_w_particles, n_w_particles + 50):
-            x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + 0.5]
+            x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + pos_y[None]]
             v_w[i] = ti.Matrix([-1.5, 0])
             J_w[i] = 1
 
         n_w_particles[None] += 50
 
+# add a new sand block with mouse position
+@ti.kernel
+def add_block(x : ti.f32):
+    if n_s_particles < 40000 - 1000:
+        for i in range(n_s_particles, n_s_particles + 1000):
+            x_s[i] = [ti.min(0.87, x) + ti.random() * 0.1, ti.random() * 0.1 + 0.87]
+            v_s[i] = ti.Matrix([0, -0.25])
+            F_s[i] = ti.Matrix([[1, 0], [0, 1]])
+            c_C0[i] = -0.01
+            alpha_s[i] = 0.267765
+
+    n_s_particles += 1000
+
 @ti.func
 def color_lerp(r1, g1, b1, r2, g2, b2, t):
     return int((r1 * (1 - t) + r2 * t) * 0x100) * 0x10000 + int((g1 * (1 - t) + g2 * t) * 0x100) * 0x100 + int((b1 * (1 - t) + b2 * t) * 0x100)
 
+# show different color for different cohesion of sand and different velocity of water
 color_s = ti.field(dtype = int, shape = n_particles)
 color_w = ti.field(dtype = int, shape = n_particles)
 @ti.kernel
@@ -293,7 +309,7 @@ def update_color():
     for i in range(n_s_particles):
         color_s[i] = color_lerp(0.521, 0.368, 0.259, 0.318, 0.223, 0.157, phi_s[i])
     for i in range(n_w_particles):
-        color_w[i] = color_lerp(0.2, 0.231, 0.792, 0.867, 0.886, 0.886, v_w[i].norm() / 3.0)
+        color_w[i] = color_lerp(0.2, 0.231, 0.792, 0.867, 0.886, 0.886, v_w[i].norm() / 7.0)
 
 initialize()
 
@@ -301,13 +317,24 @@ project_view = False
 frame = 0
 gui = ti.GUI("2D Dam", res = 512, background_color = 0xFFFFFF)
 while True:
+    # show hints
+    gui.text(content = f'w/s to move jet upward and downward', pos = (0, 0.99), color = 0x111111)
+    gui.text(content = f'left mouse click to add new porous sand block', pos = (0, 0.96), color = 0x111111)
+    gui.text(content = f'space to switch normal/project-operation-state view', pos = (0, 0.93), color = 0x111111)
+    # process input
     for e in gui.get_events(ti.GUI.PRESS):
         if e.key == gui.SPACE: project_view = not project_view
+        elif e.key == 'w': pos_y[None] += 0.01 # move jet upward
+        elif e.key == 's': pos_y[None] -= 0.01 # move jet downward
+        elif e.key == ti.GUI.LMB: add_block(e.pos[0])
         elif e.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
             exit()
+
     update_jet()
     for s in range(50):
         substep()
+
+    # project-operation-state view
     if project_view:
         gui.circles(x_w.to_numpy(), radius = 1.5, color = 0x068587)
         colors = np.array([0xFF0000, 0x00FF00, 0x0000FF], dtype = np.uint32)
