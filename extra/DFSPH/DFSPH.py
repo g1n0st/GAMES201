@@ -42,7 +42,7 @@ v = ti.Vector.field(dim, dtype = float) # velocity
 new_x = ti.Vector.field(dim, dtype = float) # prediction values for P-C scheme
 new_v = ti.Vector.field(dim, dtype = float) # prediction values for P-C scheme
 
-p = ti.field(dtype = float) # pressure
+P = ti.field(dtype = float) # pressure
 rho = ti.field(dtype = float) # density
 new_rho = ti.field(dtype = float) # prediction values for P-C scheme
 
@@ -61,13 +61,13 @@ neighbors = ti.field(dtype = int) # neighbors ids of each particle (not exceed m
 if ti.static(DYNAMIC_ALLOCATE):
     ti.root.dynamic(ti.i, MAX_NUM_PARTICLES, 2 ** 18).place(
             x, v, new_x, new_v,
-            p, rho, new_rho,
+            P, rho, new_rho,
             alpha, stiff, material,
             dv, drho)
 else:
     ti.root.dense(ti.i, 2 ** 18).place(
             x, v, new_x, new_v,
-            p, rho, new_rho,
+            P, rho, new_rho,
             alpha, stiff, material,
             dv, drho)
 
@@ -102,7 +102,69 @@ def in_grid(c):
     return res
 
 @ti.func
-def is_fluid(p)
+def is_fluid(p):
     # check whether fluid particle or boundary particle
     return material[p]
+
+@ti.kernel
+def search_neighbors():
+    for p in range(num_particle[None]):
+        num_nb = 0
+        if is_fluid(x[p]) == 1 or is_fluid(x[p]) == 0:
+            idx = (x[p] / cell_size).cast(int)
+            for offset in ti.static(ti.grouped(ti.ndrange(*((-1, 2), ) * dim))):
+                if in_grid(idx + offset) == 1:
+                    for j in range(grid_np[idx + offset]):
+                        if num_nb >= MAX_NUM_NEIGHBORS: break
+                        q = grid_p[idx + offset, j]
+                        if p != q and (x[p] - x[q]).norm() < cell_size:
+                            neighbors[p, num_nb] = q
+                            num_nb.atomic_add(1)
+
+        num_neighbors[p] = num_nb
+
+@ti.func
+def W(r, h):
+    # value of cubic spline smoothing kernel
+    k = 10.0 / (7.0 * np.pi * h ** dim)
+    q = r / h
+    res = 0.0
+    if q <= 1.0: 
+        res = k * (1 - 1.5 * q ** 2 + 0.75 * q ** 3)
+    elif q < 2.0: 
+        res = k * 0.25 * (2 - q) ** 3
+    return res
+
+@ti.func
+def dW(r, h):
+    # derivative of cubcic spline smoothing kernel
+    k = 10.0 / (7.0 * np.pi * h ** dim)
+    q = r / h
+    if q < 1.0:
+        res = (k / h) * (-3 * q + 2.25 * q ** 2)
+    elif q < 2.0:
+        res = -0.75 * (k / h) * (2 - q) ** 2
+    return res
+
+@ti.func
+def d_rho(p, q, r, norm_r):
+    # density delta, i.e. divergence
+    return m * dW(norm_r, dh) * (v[p] - v[q]).dot(r / norm_r) # formula (6)
+
+@ti.func
+def pressure(rho):
+    return rho_0 * c_0 ** 2 / gamma * ((rho / rho_0) ** gamma - 1) # equation of state (EOS)
+
+@ti.func
+def pressure_force(p, q, r, norm_r):
+    # compute the pressure force contribution, symmetric formula
+    return -m * (P[p] / rho[p] ** 2 + P[q] / rho[q] ** 2) * dW(norm_r, dh) * r / norm_r
+
+@ti.func
+def simulate_collisions(p, n, d):
+    # collision factor, assume roughly (1-c_f)*velocity loss after collision
+    c_f = 0.3
+    x[p] += v * d
+    x[p] -= (1.0 + c_f) * v[p].dot(n) * n
+    x[p] -= (1.0 + c_f) * new_v[p].dot(n) * n
 
