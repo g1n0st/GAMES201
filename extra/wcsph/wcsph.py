@@ -8,8 +8,8 @@ MAX_NUM_NEIGHBORS = 96
 MAX_NUM_PARTICLES = 5200
 
 dim = 2 # dimension of the simulation
-g = ti.Vector([0, -9.8]) # gravity
-alpha0 = 0.30 # viscosity
+g = ti.Vector([0.0, -9.81]) # gravity
+alpha0 = 0.09 # viscosity
 rho_0 = 1000.0 # initial density of water
 CFL_v = 0.25 # CFL coefficient for velocity
 CFL_a = 0.05 # CFL coefficient for acceleration
@@ -21,32 +21,21 @@ m = dx ** dim * rho_0 # particle mass
 
 # equation of state parameters
 gamma = 7.0
-c_0 = 200.0
+c_0 = 88.5
 
-res = (400, 400)
-s2w = 35
+wd = (15.0, 15.0)
+w2s = 1.0 / 15.0
 
 cell_size = 2.0 * dh
-grid_size = (np.ceil(np.array(res) / s2w / cell_size).astype(int) + 0xf) // 0x10 * 0x10 # scaling to 16x
-
-# summing up the rho for all particles to compute the average rho
-# sum_rho_err = ti.field(dtype = float, shape = ())
-# sum_drho = ti.field(dtype = float, shape = ())
+grid_size = (np.ceil(np.array(wd) / cell_size).astype(int) + 0xf) // 0x10 * 0x10 # scaling to 16x
 
 num_particles = ti.field(dtype = int, shape = ()) # total number of particles
 
 # particles properties
 x = ti.Vector.field(dim, dtype = float) # position
 v = ti.Vector.field(dim, dtype = float) # velocity
-# new_x = ti.Vector.field(dim, dtype = float) # prediction values for P-C scheme
-# new_v = ti.Vector.field(dim, dtype = float) # prediction values for P-C scheme
-
 P = ti.field(dtype = float) # pressure
 rho = ti.field(dtype = float) # density
-# new_rho = ti.field(dtype = float) # prediction values for P-C scheme
-
-# alpha = ti.field(dtype = float)
-# stiff = ti.field(dtype = float)
 material = ti.field(dtype = float) # water particle / boundary particle
 
 dv = ti.Vector.field(dim, dtype = float) # Dv/Dt
@@ -57,14 +46,7 @@ grid_p = ti.field(dtype = int) # particles ids of each grid
 num_neighbors = ti.field(dtype = int) # total number of neighbors of each particle
 neighbors = ti.field(dtype = int) # neighbors ids of each particle (not exceed maximum number of neighbors)
 
-ti.root.dense(ti.i, MAX_NUM_PARTICLES).place(
-        x, v, 
-        # new_x, new_v,
-        P, rho, 
-        # new_rho,
-        # alpha, stiff, 
-        material,
-        dv, drho)
+ti.root.dense(ti.i, MAX_NUM_PARTICLES).place(x, v, P, rho, material, dv, drho)
 
 # sparse structures
 block_size = 16 # fix size align to 16
@@ -79,13 +61,6 @@ block2.place(num_neighbors)
 block3 = block2.pointer(ti.j, MAX_NUM_NEIGHBORS // block_size)
 block3.dense(ti.j, block_size).place(neighbors)
 
-@ti.kernel
-def allocate_particles():
-    for p in range(num_particles[None]):
-        idx = (x[p] / cell_size).cast(int) # get cell index of particle's position
-        offset = grid_np[idx].atomic_add(1)
-        grid_p[idx, offset] = p
-
 @ti.func
 def in_grid(c):
     res = 1
@@ -99,21 +74,26 @@ def is_fluid(p):
     return material[p]
 
 @ti.kernel
+def allocate_particles():
+    for p in range(num_particles[None]):
+        idx = (x[p] / cell_size).cast(int) # get cell index of particle's position
+        offset = ti.atomic_add(grid_np[idx], 1)
+        grid_p[idx, offset] = p
+
+@ti.kernel
 def search_neighbors():
     for p in range(num_particles[None]):
-        num_nb = 0
-        if is_fluid(p) == 1 or is_fluid(p) == 0:
-            idx = (x[p] / cell_size).cast(int)
-            for offset in ti.static(ti.grouped(ti.ndrange(*((-1, 2), ) * dim))):
-                if in_grid(idx + offset) == 1:
-                    for j in range(grid_np[idx + offset]):
-                        if num_nb >= MAX_NUM_NEIGHBORS: break
-                        q = grid_p[idx + offset, j]
-                        if p != q and (x[p] - x[q]).norm() < cell_size:
-                            neighbors[p, num_nb] = q
-                            num_nb.atomic_add(1)
-
-        num_neighbors[p] = num_nb
+        num_neighbors[p] = 0
+        idx = (x[p] / cell_size).cast(int)
+        for offset in ti.static(ti.grouped(ti.ndrange(*((-1, 2), ) * dim))): # [-1, 0, 1]
+            pos = idx + offset
+            if in_grid(pos) == 1:
+                for k in range(grid_np[pos]):
+                    if num_neighbors[p] >= MAX_NUM_NEIGHBORS: break
+                    q = grid_p[pos, k]
+                    if p != q and (x[p] - x[q]).norm() < cell_size:
+                        nb = ti.atomic_add(num_neighbors[p], 1)
+                        neighbors[p, nb] = q
 
 @ti.func
 def W(r, h):
@@ -154,31 +134,33 @@ def pressure_force(p, q, r, norm_r):
     return -m * (P[p] / rho[p] ** 2 + P[q] / rho[q] ** 2) * dW(norm_r, dh) * r / norm_r
 
 @ti.func
-def collision(p, n, d):
-    # collision factor, assume roughly (1-c_f)*velocity loss after collision
-    c_f = 0.3
-    x[p] += n * d
-    x[p] -= (1.0 + c_f) * v[p].dot(n) * n
-    x[p] -= (1.0 + c_f) * new_v[p].dot(n) * n
+def viscosity_force(p, q, r, norm_r):
+    res = ti.Vector.zero(float, dim)
+    v_xy = (v[p] - v[q]).dot(r)
+    if v_xy < 0.0:
+        # artifical viscosity
+        vmu = -2.0 * alpha0 * dx * c_0 / (rho[p] + rho[q])
+        res = -m * vmu * v_xy / (norm_r ** 2 + 0.01 * dx ** 2) * dW(norm_r, dh) * r / norm_r
+    return res
 
-gap = 6.0
+gap = 0.3
 @ti.kernel
 def boundary_condition():
     for p in range(num_particles[None]):
         if is_fluid(p) == 1:
             for i in ti.static(range(dim)):
-                normal = ti.Vector.zero(float, dim)
-                normal[i] = 1.0
-                if x[p][i] < gap:          v[p][i] = 0 # collision(p, normal, gap - x[p][i])
-                normal[i] = -1.0
-                if x[p][i] > res[i] - gap: v[p][i] = 0 # collision(p, normal, x[p][i] - res[i] + gap)
+                # normal = ti.Vector.zero(float, dim)
+                # normal[i] = 1.0
+                if x[p][i] < gap and v[p][i] < 0:         v[p][i] = 0 # collision(p, normal, gap - x[p][i])
+                # normal[i] = -1.0
+                if x[p][i] > wd[i] - gap and v[p][i] > 0: v[p][i] = 0 # collision(p, normal, x[p][i] - wd[i] + gap)
 
 @ti.kernel
 def wc_compute():
     for p in range(num_particles[None]):
         d_v = ti.Vector.zero(float, dim)
         d_rho = 0.0
-        '''
+
         for j in range(num_neighbors[p]):
             q = neighbors[p, j]
 
@@ -190,9 +172,11 @@ def wc_compute():
             d_rho += delta_rho(p, q, r, norm)
 
             if is_fluid(p) == 1:
+                # compute Viscosity force contribution
+                d_v += viscosity_force(p, q, r, norm)
+
                 # compute pressure force contribution
-                d_v += pressure_force(p, q, r, norm)
-        '''
+                d_v += pressure_force(p, q, r, norm) * 0.1
         
         # add body force
         if is_fluid(p) == 1:
@@ -222,24 +206,28 @@ def substep():
 
 @ti.kernel
 def initialize():
-    num_particles[None] = 50 * 50
-    for i in range(50):
-        for j in range(50):
-            p = i * 50 + j
-            x[p] = [i * dx + 2, j * dx + 2]
-            v[p] = [0, -1]
+    block_size = 50
+    num_particles[None] = block_size ** 2
+    for i in range(block_size):
+        for j in range(block_size):
+            p = i * block_size + j
+            x[p] = [i * dx + 4.0, j * dx + 1.0] # collapsing column of water, height H = 4m
+            v[p] = [0, -1.0]
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
 
-print(grid_size)
 initialize()
-gui = ti.GUI("2D Dam", res = res, background_color = 0xFFFFFF)
-while True:
+gui = ti.GUI("wcsph", res = 512, background_color = 0xFFFFFF)
+while gui.running:
     for s in range(50):
         substep()
-    
-    gui.circles(x.to_numpy() / res * s2w, radius = 1.5, color = 0x068587)
-    gui.show()
 
-    
+    gui.circles(x.to_numpy() * w2s, radius = 2, color = 0x068587)
+
+    # target particle
+    # target = 514
+    # gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
+    # for i in range(num_neighbors[target]):
+    #     gui.circle([x[neighbors[target, i]][0] * w2s, x[neighbors[target, i]][1] * w2s], radius = 2, color = 0xFFFF00)
+    gui.show()
