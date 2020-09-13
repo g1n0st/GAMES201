@@ -4,12 +4,12 @@ import numpy as np
 ti.init(arch = ti.gpu)
 
 MAX_GRID_NP = 96
-MAX_NUM_NEIGHBORS = 96
-MAX_NUM_PARTICLES = 5200
+MAX_NUM_NEIGHBORS = 128
+MAX_NUM_PARTICLES = 10000
 
 dim = 2 # dimension of the simulation
 g = ti.Vector([0.0, -9.81]) # gravity
-alpha0 = 0.09 # viscosity
+alpha0 = 0.08 # viscosity
 rho_0 = 1000.0 # initial density of water
 CFL_v = 0.25 # CFL coefficient for velocity
 CFL_a = 0.05 # CFL coefficient for acceleration
@@ -21,7 +21,7 @@ m = dx ** dim * rho_0 # particle mass
 
 # equation of state parameters
 gamma = 7.0
-c_0 = 88.5
+c_s = 88.5 # speed of sound in the fluid
 
 wd = (15.0, 15.0)
 w2s = 1.0 / 15.0
@@ -36,7 +36,7 @@ x = ti.Vector.field(dim, dtype = float) # position
 v = ti.Vector.field(dim, dtype = float) # velocity
 P = ti.field(dtype = float) # pressure
 rho = ti.field(dtype = float) # density
-material = ti.field(dtype = float) # water particle / boundary particle
+material = ti.field(dtype = int) # water particle / boundary particle
 
 dv = ti.Vector.field(dim, dtype = float) # Dv/Dt
 drho = ti.field(dtype = float) # Drho/Dt
@@ -126,7 +126,7 @@ def delta_rho(p, q, r, norm_r):
 
 @ti.func
 def pressure(rho):
-    return rho_0 * c_0 ** 2 / gamma * ((rho / rho_0) ** gamma - 1) # equation of state (EOS)
+    return rho_0 * c_s ** 2 / gamma * ((rho / rho_0) ** gamma - 1) # equation of state (EOS)
 
 @ti.func
 def pressure_force(p, q, r, norm_r):
@@ -139,7 +139,7 @@ def viscosity_force(p, q, r, norm_r):
     v_xy = (v[p] - v[q]).dot(r)
     if v_xy < 0.0:
         # artifical viscosity
-        vmu = -2.0 * alpha0 * dx * c_0 / (rho[p] + rho[q])
+        vmu = -2.0 * alpha0 * dx * c_s / (rho[p] + rho[q])
         res = -m * vmu * v_xy / (norm_r ** 2 + 0.01 * dx ** 2) * dW(norm_r, dh) * r / norm_r
     return res
 
@@ -176,7 +176,7 @@ def wc_compute():
                 d_v += viscosity_force(p, q, r, norm)
 
                 # compute pressure force contribution
-                d_v += pressure_force(p, q, r, norm) * 0.1
+                d_v += pressure_force(p, q, r, norm)
         
         # add body force
         if is_fluid(p) == 1:
@@ -191,7 +191,7 @@ def wc_update():
         v[p] += dt * dv[p]
         x[p] += dt * v[p]
         rho[p] += dt * drho[p]
-        P[p] = pressure(rho[p])
+        P[p] = ti.max(pressure(rho[p]), 0)
 
 def substep():
     block1.deactivate_all()
@@ -216,18 +216,76 @@ def initialize():
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
+    
+    wall_size = 5
+    # down_wall
+    off = num_particles[None]
+    for i in range(150):
+        for k in range(wall_size):
+            p = off + i * wall_size + k
+            x[p] = [i * dx + 0.05, k * dx + 0.05]
+            v[p] = [0, 0]
+            rho[p] = rho_0
+            P[p] = pressure(rho_0)
+            material[p] = 0
+    num_particles[None] += 150 * wall_size
+    off = num_particles[None]
+
+    # left wall
+    for i in range(140):
+        for k in range(wall_size):
+            p = off + i * wall_size + k
+            x[p] = [k * dx + 0.05, i * dx + 0.55]
+            v[p] = [0, 0]
+            rho[p] = rho_0
+            P[p] = pressure(rho_0)
+            material[p] = 0
+    num_particles[None] += 140 * wall_size
+    off = num_particles[None]
+
+    # right wall
+    for i in range(140):
+        for k in range(wall_size):
+            p = off + i * wall_size + k
+            x[p] = [15 - 0.05 - k * dx, i * dx + 0.55]
+            v[p] = [0, 0]
+            rho[p] = rho_0
+            P[p] = pressure(rho_0)
+            material[p] = 0
+    num_particles[None] += 140 * wall_size
+    off = num_particles[None]
+
+    # top wall
+    for i in range(150):
+        for k in range(wall_size):
+            p = off + i * wall_size + k
+            x[p] = [i * dx + 0.05, 15.0 - 0.05 - k * dx]
+            v[p] = [0, 0]
+            rho[p] = rho_0
+            P[p] = pressure(rho_0)
+            material[p] = 0
+    num_particles[None] += 150 * wall_size
+    off = num_particles[None]
 
 initialize()
 gui = ti.GUI("wcsph", res = 512, background_color = 0xFFFFFF)
+
+frame = 0
 while gui.running:
-    for s in range(50):
+    for s in range(20):
         substep()
 
-    gui.circles(x.to_numpy() * w2s, radius = 2, color = 0x068587)
+    colors = np.array([0x855E42, 0x068587], dtype = np.uint32)
+    gui.circles(x.to_numpy() * w2s, radius = 2, color = colors[material.to_numpy()])
 
+    '''
     # target particle
-    # target = 514
-    # gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
-    # for i in range(num_neighbors[target]):
-    #     gui.circle([x[neighbors[target, i]][0] * w2s, x[neighbors[target, i]][1] * w2s], radius = 2, color = 0xFFFF00)
-    gui.show()
+    target = 514
+    gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
+    for i in range(num_neighbors[target]):
+        gui.circle([x[neighbors[target, i]][0] * w2s, x[neighbors[target, i]][1] * w2s], radius = 2, color = 0xFFFF00)
+    '''
+
+    if frame % 10 == 0: gui.show(f'{frame // 10:06d}.png')
+    else: gui.show()
+    frame += 1
