@@ -9,13 +9,13 @@ MAX_NUM_PARTICLES = 10000
 
 dim = 2 # dimension of the simulation
 g = ti.Vector([0.0, -9.81]) # gravity
-alpha0 = 0.08 # viscosity
+alpha0 = 0.10 # viscosity
 rho_0 = 1000.0 # initial density of water
 CFL_v = 0.25 # CFL coefficient for velocity
 CFL_a = 0.05 # CFL coefficient for acceleration
 
 dx = 0.1 # particle radius
-dh = dx * 1.3 # smooth length
+dh = dx * 3.0 # smooth length
 dt = 1e-4 # adaptive time step size according to CFL condition
 m = dx ** dim * rho_0 # particle mass
 
@@ -23,11 +23,15 @@ m = dx ** dim * rho_0 # particle mass
 gamma = 7.0
 c_s = 88.5 # speed of sound in the fluid
 
+# surface tension parameters
+c = 3.4e-1 # a user-tuned coefficient that controls the strength of the interaction force
+k = (8 / 3) ** (1 / 3) # the required enlargement ratio k for the original radius of the neighborhood h
+kh = dh * k
+
 wd = (15.0, 15.0)
 w2s = 1.0 / 15.0
 
-cell_size = 2.0 * dh
-grid_size = (np.ceil(np.array(wd) / cell_size).astype(int) + 0xf) // 0x10 * 0x10 # scaling to 16x
+grid_size = (np.ceil(np.array(wd) / dh).astype(int) + 0xf) // 0x10 * 0x10 # scaling to 16x
 
 num_particles = ti.field(dtype = int, shape = ()) # total number of particles
 
@@ -76,7 +80,7 @@ def is_fluid(p):
 @ti.kernel
 def allocate_particles():
     for p in range(num_particles[None]):
-        idx = (x[p] / cell_size).cast(int) # get cell index of particle's position
+        idx = (x[p] / dh).cast(int) # get cell index of particle's position
         offset = ti.atomic_add(grid_np[idx], 1)
         grid_p[idx, offset] = p
 
@@ -84,40 +88,35 @@ def allocate_particles():
 def search_neighbors():
     for p in range(num_particles[None]):
         num_neighbors[p] = 0
-        idx = (x[p] / cell_size).cast(int)
+        idx = (x[p] / dh).cast(int)
         for offset in ti.static(ti.grouped(ti.ndrange(*((-1, 2), ) * dim))): # [-1, 0, 1]
             pos = idx + offset
             if in_grid(pos) == 1:
                 for k in range(grid_np[pos]):
                     if num_neighbors[p] >= MAX_NUM_NEIGHBORS: break
                     q = grid_p[pos, k]
-                    if p != q and (x[p] - x[q]).norm() < cell_size:
+                    if p != q and (x[p] - x[q]).norm() < dh:
                         nb = ti.atomic_add(num_neighbors[p], 1)
                         neighbors[p, nb] = q
 
+sigma = [0.0, 4 / (3 * dh), 40 / (7 * np.pi * dh ** 2), 8 / (np.pi * dh ** 3)]
+s_d = sigma[dim]
+# cubic spline smoothing kernel
 @ti.func
 def W(r, h):
-    # value of cubic spline smoothing kernel
-    k = 10.0 / (7.0 * np.pi * h ** dim)
-    q = r / h
     res = 0.0
-    if q <= 1.0: 
-        res = k * (1 - 1.5 * q ** 2 + 0.75 * q ** 3)
-    elif q < 2.0: 
-        res = k * 0.25 * (2 - q) ** 3
-    return res
-
+    q = r / h
+    if q <= 0.5: res = 6 * (q ** 3 - q ** 2) + 1
+    elif q <= 1.0: res = 2 * (1 - q) ** 3
+    return s_d * res
+# derivative of cubcic spline smoothing kernel
 @ti.func
 def dW(r, h):
-    # derivative of cubcic spline smoothing kernel
-    k = 10.0 / (7.0 * np.pi * h ** dim)
-    q = r / h
     res = 0.0
-    if q < 1.0:
-        res = (k / h) * (-3 * q + 2.25 * q ** 2)
-    elif q < 2.0:
-        res = -0.75 * (k / h) * (2 - q) ** 2
-    return res
+    q = r / h
+    if q <= 0.5: res = 6 * (3 * q ** 2 - 2 * q)
+    elif q <= 1.0: res = -6 * (1 - q) ** 2
+    return (s_d / h) * res
 
 @ti.func
 def delta_rho(p, q, r, norm_r):
@@ -143,40 +142,35 @@ def viscosity_force(p, q, r, norm_r):
         res = -m * vmu * v_xy / (norm_r ** 2 + 0.01 * dx ** 2) * dW(norm_r, dh) * r / norm_r
     return res
 
+@ti.func
+def pairwise_force(p, q, r, norm_r):
+    fr = 0.0
+    if norm_r <= kh: fr = ti.cos(3 * np.pi * norm_r / (2 * kh))
+    return c * m ** 2 * fr * r / norm_r
+
 gap = 0.3
 @ti.kernel
 def boundary_condition():
     for p in range(num_particles[None]):
         if is_fluid(p) == 1:
             for i in ti.static(range(dim)):
-                # normal = ti.Vector.zero(float, dim)
-                # normal[i] = 1.0
-                if x[p][i] < gap and v[p][i] < 0:         v[p][i] = 0 # collision(p, normal, gap - x[p][i])
-                # normal[i] = -1.0
-                if x[p][i] > wd[i] - gap and v[p][i] > 0: v[p][i] = 0 # collision(p, normal, x[p][i] - wd[i] + gap)
+                if x[p][i] < gap and v[p][i] < 0:         v[p][i] = 0
+                if x[p][i] > wd[i] - gap and v[p][i] > 0: v[p][i] = 0
 
 @ti.kernel
 def wc_compute():
     for p in range(num_particles[None]):
         d_v = ti.Vector.zero(float, dim)
         d_rho = 0.0
-
         for j in range(num_neighbors[p]):
             q = neighbors[p, j]
-
-            # compute distance and it's norm
             r = x[p] - x[q]
-            norm = ti.max(r.norm(), 1e-5)
-
-            # compute density change
-            d_rho += delta_rho(p, q, r, norm)
-
+            norm = ti.max(r.norm(), 1e-5) # compute distance and it's norm
+            d_rho += delta_rho(p, q, r, norm) # compute density change
             if is_fluid(p) == 1:
-                # compute Viscosity force contribution
-                d_v += viscosity_force(p, q, r, norm)
-
-                # compute pressure force contribution
-                d_v += pressure_force(p, q, r, norm)
+                d_v += viscosity_force(p, q, r, norm) # compute Viscosity force contribution
+                d_v += pressure_force(p, q, r, norm) # compute pressure force contribution
+                # d_v += pairwise_force(p, q, r, norm) # compute surface tension contribution
         
         # add body force
         if is_fluid(p) == 1:
@@ -206,6 +200,7 @@ def substep():
 
 @ti.kernel
 def initialize():
+    '''
     block_size = 50
     num_particles[None] = block_size ** 2
     for i in range(block_size):
@@ -213,6 +208,18 @@ def initialize():
             p = i * block_size + j
             x[p] = [i * dx + 4.0, j * dx + 1.0] # collapsing column of water, height H = 4m
             v[p] = [0, -1.0]
+            rho[p] = rho_0
+            P[p] = pressure(rho_0)
+            material[p] = 1
+    '''
+
+    block_size = 10
+    num_particles[None] = block_size ** 2
+    for i in range(block_size):
+        for j in range(block_size):
+            p = i * block_size + j
+            x[p] = [i * dx + 4.0, j * dx + 0.65] # collapsing column of water, height H = 4m
+            v[p] = [0, 0]
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
@@ -278,8 +285,8 @@ while gui.running:
     colors = np.array([0x855E42, 0x068587], dtype = np.uint32)
     gui.circles(x.to_numpy() * w2s, radius = 2, color = colors[material.to_numpy()])
 
-    '''
     # target particle
+    '''
     target = 514
     gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
     for i in range(num_neighbors[target]):
