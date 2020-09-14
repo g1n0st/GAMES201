@@ -24,7 +24,7 @@ gamma = 7.0
 c_s = 88.5 # speed of sound in the fluid
 
 # surface tension parameters
-c = 3.4e-1 # a user-tuned coefficient that controls the strength of the interaction force
+c = 1e-2 # a user-tuned coefficient that controls the strength of the interaction force
 k = (8 / 3) ** (1 / 3) # the required enlargement ratio k for the original radius of the neighborhood h
 kh = dh * k
 
@@ -80,7 +80,7 @@ def is_fluid(p):
 @ti.kernel
 def allocate_particles():
     for p in range(num_particles[None]):
-        idx = (x[p] / dh).cast(int) # get cell index of particle's position
+        idx = (x[p] / kh).cast(int) # get cell index of particle's position
         offset = ti.atomic_add(grid_np[idx], 1)
         grid_p[idx, offset] = p
 
@@ -88,14 +88,14 @@ def allocate_particles():
 def search_neighbors():
     for p in range(num_particles[None]):
         num_neighbors[p] = 0
-        idx = (x[p] / dh).cast(int)
+        idx = (x[p] / kh).cast(int)
         for offset in ti.static(ti.grouped(ti.ndrange(*((-1, 2), ) * dim))): # [-1, 0, 1]
             pos = idx + offset
             if in_grid(pos) == 1:
                 for k in range(grid_np[pos]):
                     if num_neighbors[p] >= MAX_NUM_NEIGHBORS: break
                     q = grid_p[pos, k]
-                    if p != q and (x[p] - x[q]).norm() < dh:
+                    if p != q and (x[p] - x[q]).norm() < kh:
                         nb = ti.atomic_add(num_neighbors[p], 1)
                         neighbors[p, nb] = q
 
@@ -201,6 +201,8 @@ def update_neighbors():
     block1.deactivate_all()
     block0.deactivate_all()
     block2.deactivate_all()
+    grid_np.fill(0)
+    num_neighbors.fill(0)
     allocate_particles()
     search_neighbors()
 
@@ -214,6 +216,7 @@ def substep():
 
 @ti.kernel
 def initialize():
+    '''
     block_size = 50
     num_particles[None] = block_size ** 2
     for i in range(block_size):
@@ -224,19 +227,18 @@ def initialize():
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
-
     '''
+
     block_size = 10
     num_particles[None] = block_size ** 2
     for i in range(block_size):
         for j in range(block_size):
             p = i * block_size + j
-            x[p] = [i * dx + 4.0, j * dx + 0.65] # collapsing column of water, height H = 4m
-            v[p] = [0, 0]
+            x[p] = [i * dx + 4.0, j * dx + 12.5] # collapsing column of water, height H = 4m
+            v[p] = [0, -5.0]
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
-    '''
     
     wall_size = 5
     # down_wall
@@ -300,12 +302,10 @@ while gui.running:
     gui.circles(x.to_numpy() * w2s, radius = 2, color = colors[material.to_numpy()])
 
     # target particle
-    '''
     target = 514
     gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
     for i in range(num_neighbors[target]):
         gui.circle([x[neighbors[target, i]][0] * w2s, x[neighbors[target, i]][1] * w2s], radius = 2, color = 0xFFFF00)
-    '''
 
     if frame % 10 == 0: gui.show(f'{frame // 10:06d}.png')
     else: gui.show()
