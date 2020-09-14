@@ -3,9 +3,9 @@ import numpy as np
 
 ti.init(arch = ti.gpu)
 
-MAX_GRID_NP = 96
-MAX_NUM_NEIGHBORS = 128
-MAX_NUM_PARTICLES = 10000
+MAX_GRID_NP = 32
+MAX_NUM_NEIGHBORS = 96
+MAX_NUM_PARTICLES = 6400
 
 dim = 2 # dimension of the simulation
 g = ti.Vector([0.0, -9.81]) # gravity
@@ -128,6 +128,11 @@ def pressure(rho):
     return rho_0 * c_s ** 2 / gamma * ((rho / rho_0) ** gamma - 1) # equation of state (EOS)
 
 @ti.func
+def pressure_force_(p, q, r, norm_r):
+    # compute the pressure force contribution, symmetric formula
+    return -m * (P[p] / rho[p] ** 2 + P[q] / rho[q] ** 2) * dW(norm_r, dh) * r / norm_r
+
+@ti.func
 def pressure_force(p, q, r, norm_r):
     p_ab = (rho[q] * P[p] + rho[p] * P[q]) / (rho[p] + rho[q]) # density-weighted inter-particle averaged pressure
     return - 1 / m * ((m / rho[p]) ** 2 + (m / rho[q]) ** 2) * p_ab * dW(norm_r, dh) * r / norm_r # according to Hu and Adams
@@ -177,10 +182,16 @@ def update_rhox():
         P[p] = pressure(rho[p])
         x[p] += (dt / 2) * v[p]
 
+eta = 0.2 # a user-defined coefficient to determine the degree of anisotropy
+eps_min = 0.5 # user-defined minimum value of the eigenvalue
 @ti.kernel
 def update_vdv():
     for p in range(num_particles[None]):
         dv[p] = ti.Vector.zero(float, dim)
+        # anisotropic filtering parameters
+        C = ti.Matrix.zero(float, dim, dim) # anisotropic covariance
+        w = 0.0
+        pf = ti.Vector.zero(float, dim) # total pairwise force
         for j in range(num_neighbors[p]):
             q = neighbors[p, j]
             r = x[p] - x[q]
@@ -188,11 +199,22 @@ def update_vdv():
             if is_fluid(p) == 1:
                 dv[p] += viscosity_force(p, q, r, norm) # compute Viscosity force contribution
                 dv[p] += pressure_force(p, q, r, norm) # compute pressure force contribution
-                dv[p] += pairwise_force(p, q, r, norm) # compute surface tension contribution
+                w += W(norm, dh) 
+                C += r.outer_product(r) * w
+                pf += pairwise_force(p, q, r, norm) # compute surface tension contribution
         
-        # add body force
+        # add body force and filtered pairwise force
         if is_fluid(p) == 1:
             dv[p] += g
+        
+            C /= w
+            U, sig, V = ti.svd(C)
+            for i in ti.static(range(dim)):
+                sig[i, i] = ti.max(sig[i, i], eps_min) 
+
+            G = U @ sig.inverse() @ V.transpose()
+            T = (1 - eta) * ti.Matrix.identity(float, dim) + eta * G / G.determinant()
+            dv[p] += T @ pf
     
     for p in range(num_particles[None]):
         v[p] += (dt / 2) * dv[p]
@@ -216,7 +238,6 @@ def substep():
 
 @ti.kernel
 def initialize():
-    '''
     block_size = 50
     num_particles[None] = block_size ** 2
     for i in range(block_size):
@@ -227,18 +248,19 @@ def initialize():
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
-    '''
 
+    '''
     block_size = 10
     num_particles[None] = block_size ** 2
     for i in range(block_size):
         for j in range(block_size):
             p = i * block_size + j
             x[p] = [i * dx + 4.0, j * dx + 12.5] # collapsing column of water, height H = 4m
-            v[p] = [0, -5.0]
+            v[p] = [0, -13.0]
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
+    '''
     
     wall_size = 5
     # down_wall
