@@ -121,7 +121,7 @@ def dW(r, h):
 @ti.func
 def delta_rho(p, q, r, norm_r):
     # density delta, i.e. divergence
-    return m * dW(norm_r, dh) * (v[p] - v[q]).dot(r / norm_r) # formula (6)
+    return (m / rho[q]) * dW(norm_r, dh) * (v[p] - v[q]).dot(r / norm_r) # from J.J. Monaghan, Smoothed particle hydrodynamics
 
 @ti.func
 def pressure(rho):
@@ -129,9 +129,8 @@ def pressure(rho):
 
 @ti.func
 def pressure_force(p, q, r, norm_r):
-    # compute the pressure force contribution, symmetric formula
-    return -m * (P[p] / rho[p] ** 2 + P[q] / rho[q] ** 2) * dW(norm_r, dh) * r / norm_r
-
+    p_ab = (rho[q] * P[p] + rho[p] * P[q]) / (rho[p] + rho[q]) # density-weighted inter-particle averaged pressure
+    return - 1 / m * ((m / rho[p]) ** 2 + (m / rho[q]) ** 2) * p_ab * dW(norm_r, dh) * r / norm_r # according to Hu and Adams
 @ti.func
 def viscosity_force(p, q, r, norm_r):
     res = ti.Vector.zero(float, dim)
@@ -166,7 +165,7 @@ def wc_compute():
             q = neighbors[p, j]
             r = x[p] - x[q]
             norm = ti.max(r.norm(), 1e-5) # compute distance and it's norm
-            d_rho += delta_rho(p, q, r, norm) # compute density change
+            d_rho += rho[p] * delta_rho(p, q, r, norm) # compute density change
             if is_fluid(p) == 1:
                 d_v += viscosity_force(p, q, r, norm) # compute Viscosity force contribution
                 d_v += pressure_force(p, q, r, norm) # compute pressure force contribution
@@ -180,7 +179,6 @@ def wc_compute():
 
 @ti.kernel
 def wc_update():
-    # forward euler
     for p in range(num_particles[None]):
         v[p] += dt * dv[p]
         x[p] += dt * v[p]
@@ -194,13 +192,14 @@ def substep():
 
     allocate_particles()
     search_neighbors()
+
     wc_compute()
     wc_update()
+    
     boundary_condition()
 
 @ti.kernel
 def initialize():
-    '''
     block_size = 50
     num_particles[None] = block_size ** 2
     for i in range(block_size):
@@ -211,8 +210,8 @@ def initialize():
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
-    '''
 
+    '''
     block_size = 10
     num_particles[None] = block_size ** 2
     for i in range(block_size):
@@ -223,6 +222,7 @@ def initialize():
             rho[p] = rho_0
             P[p] = pressure(rho_0)
             material[p] = 1
+    '''
     
     wall_size = 5
     # down_wall
