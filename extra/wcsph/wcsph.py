@@ -157,45 +157,59 @@ def boundary_condition():
                 if x[p][i] > wd[i] - gap and v[p][i] > 0: v[p][i] = 0
 
 @ti.kernel
-def wc_compute():
+def update_vx():
     for p in range(num_particles[None]):
-        d_v = ti.Vector.zero(float, dim)
-        d_rho = 0.0
+        v[p] += (dt / 2) * dv[p]
+        x[p] += (dt / 2) * v[p]
+
+@ti.kernel
+def update_rhox():
+    for p in range(num_particles[None]):
+        drho[p] = 0
         for j in range(num_neighbors[p]):
             q = neighbors[p, j]
             r = x[p] - x[q]
             norm = ti.max(r.norm(), 1e-5) # compute distance and it's norm
-            d_rho += rho[p] * delta_rho(p, q, r, norm) # compute density change
+            drho[p] += rho[p] * delta_rho(p, q, r, norm) # compute density change
+
+    for p in range(num_particles[None]):
+        rho[p] += dt * drho[p]
+        P[p] = pressure(rho[p])
+        x[p] += (dt / 2) * v[p]
+
+@ti.kernel
+def update_vdv():
+    for p in range(num_particles[None]):
+        dv[p] = ti.Vector.zero(float, dim)
+        for j in range(num_neighbors[p]):
+            q = neighbors[p, j]
+            r = x[p] - x[q]
+            norm = ti.max(r.norm(), 1e-5) # compute distance and it's norm
             if is_fluid(p) == 1:
-                d_v += viscosity_force(p, q, r, norm) # compute Viscosity force contribution
-                d_v += pressure_force(p, q, r, norm) # compute pressure force contribution
-                # d_v += pairwise_force(p, q, r, norm) # compute surface tension contribution
+                dv[p] += viscosity_force(p, q, r, norm) # compute Viscosity force contribution
+                dv[p] += pressure_force(p, q, r, norm) # compute pressure force contribution
+                dv[p] += pairwise_force(p, q, r, norm) # compute surface tension contribution
         
         # add body force
         if is_fluid(p) == 1:
-            d_v += g
-        
-        dv[p], drho[p] = d_v, d_rho
-
-@ti.kernel
-def wc_update():
+            dv[p] += g
+    
     for p in range(num_particles[None]):
-        v[p] += dt * dv[p]
-        x[p] += dt * v[p]
-        rho[p] += dt * drho[p]
-        P[p] = ti.max(pressure(rho[p]), 0)
+        v[p] += (dt / 2) * dv[p]
 
-def substep():
+def update_neighbors():
     block1.deactivate_all()
     block0.deactivate_all()
     block2.deactivate_all()
-
     allocate_particles()
     search_neighbors()
 
-    wc_compute()
-    wc_update()
-    
+def substep():
+    update_vx() # velocity-Verlet scheme
+    update_neighbors()
+    update_rhox()
+    update_neighbors()
+    update_vdv()
     boundary_condition()
 
 @ti.kernel
