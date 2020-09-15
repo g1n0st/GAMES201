@@ -9,27 +9,27 @@ MAX_NUM_PARTICLES = 6400
 
 dim = 2 # dimension of the simulation
 g = ti.Vector([0.0, -9.81]) # gravity
-alpha0 = 0.10 # viscosity
+alpha0 = 0.40 # viscosity
 rho_0 = 1000.0 # initial density of water
 CFL_v = 0.25 # CFL coefficient for velocity
 CFL_a = 0.05 # CFL coefficient for acceleration
 
-dx = 0.1 # particle radius
+dx = 5e-4 # particle radius
 dh = dx * 3.0 # smooth length
-dt = 1e-4 # adaptive time step size according to CFL condition
+dt = 3e-5 # adaptive time step size according to CFL condition
 m = dx ** dim * rho_0 # particle mass
 
 # equation of state parameters
 gamma = 7.0
-c_s = 88.5 # speed of sound in the fluid
+c_s = 9.0 # speed of sound in the fluid
 
 # surface tension parameters
-c = 1e-2 # a user-tuned coefficient that controls the strength of the interaction force
+c = 1.9e8 # a user-tuned coefficient that controls the strength of the interaction force
 k = (8 / 3) ** (1 / 3) # the required enlargement ratio k for the original radius of the neighborhood h
 kh = dh * k
 
-wd = (15.0, 15.0)
-w2s = 1.0 / 15.0
+wd = (15.0 * 5e-3, 15.0 * 5e-3)
+w2s = 1.0 / (15.0 * 5e-3)
 
 grid_size = (np.ceil(np.array(wd) / dh).astype(int) + 0xf) // 0x10 * 0x10 # scaling to 16x
 
@@ -152,7 +152,7 @@ def pairwise_force(p, q, r, norm_r):
     if norm_r <= kh: fr = ti.cos(3 * np.pi * norm_r / (2 * kh))
     return c * m ** 2 * fr * r / norm_r
 
-gap = 0.3
+gap = 0.3 * 5e-3
 @ti.kernel
 def boundary_condition():
     for p in range(num_particles[None]):
@@ -236,98 +236,62 @@ def substep():
     update_vdv()
     boundary_condition()
 
+@ti.func
+def add_particle(position, velocity, mat):
+    p = num_particles[None]
+    num_particles[None] += 1
+    x[p] = position
+    v[p] = velocity
+    rho[p] = rho_0
+    P[p] = pressure(rho_0)
+    material[p] = mat
+
 @ti.kernel
 def initialize():
     block_size = 50
-    num_particles[None] = block_size ** 2
     for i in range(block_size):
         for j in range(block_size):
-            p = i * block_size + j
-            x[p] = [i * dx + 4.0, j * dx + 1.0] # collapsing column of water, height H = 4m
-            v[p] = [0, -1.0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 1
-
-    '''
-    block_size = 10
-    num_particles[None] = block_size ** 2
-    for i in range(block_size):
-        for j in range(block_size):
-            p = i * block_size + j
-            x[p] = [i * dx + 4.0, j * dx + 12.5] # collapsing column of water, height H = 4m
-            v[p] = [0, -13.0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 1
-    '''
+            add_particle([i * dx + 4.0 * 5e-3, j * dx + 7.0 * 5e-3], [0, 0], 1)
     
     wall_size = 5
     # down_wall
-    off = num_particles[None]
     for i in range(150):
         for k in range(wall_size):
-            p = off + i * wall_size + k
-            x[p] = [i * dx + 0.05, k * dx + 0.05]
-            v[p] = [0, 0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 0
-    num_particles[None] += 150 * wall_size
-    off = num_particles[None]
+            add_particle([i * dx + 0.05 * 5e-3, k * dx + 0.05 * 5e-3], [0, 0], 0)
 
     # left wall
     for i in range(140):
         for k in range(wall_size):
-            p = off + i * wall_size + k
-            x[p] = [k * dx + 0.05, i * dx + 0.55]
-            v[p] = [0, 0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 0
-    num_particles[None] += 140 * wall_size
-    off = num_particles[None]
+            add_particle([k * dx + 0.05 * 5e-3, i * dx + 0.55 * 5e-3], [0, 0], 0)
 
     # right wall
     for i in range(140):
         for k in range(wall_size):
-            p = off + i * wall_size + k
-            x[p] = [15 - 0.05 - k * dx, i * dx + 0.55]
-            v[p] = [0, 0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 0
-    num_particles[None] += 140 * wall_size
-    off = num_particles[None]
+            add_particle([(15 - 0.05) * 5e-3 - k * dx, i * dx + 0.55 * 5e-3], [0, 0], 0)
 
     # top wall
     for i in range(150):
         for k in range(wall_size):
-            p = off + i * wall_size + k
-            x[p] = [i * dx + 0.05, 15.0 - 0.05 - k * dx]
-            v[p] = [0, 0]
-            rho[p] = rho_0
-            P[p] = pressure(rho_0)
-            material[p] = 0
-    num_particles[None] += 150 * wall_size
-    off = num_particles[None]
+            add_particle([i * dx + 0.05 * 5e-3, (15.0 - 0.05) * 5e-3 - k * dx], [0, 0], 0)
+
+@ti.kernel
+def gank():
+    block_size = 8
+    for i in range(block_size):
+        for j in range(block_size):
+            add_particle([i * dx + 4.0 * 5e-3, j * dx + 12.5 * 5e-3], [0, -350.0 * 5e-3], 0)
 
 initialize()
 gui = ti.GUI("wcsph", res = 512, background_color = 0xFFFFFF)
 
 frame = 0
 while gui.running:
+    if frame == 1250: gank()
     for s in range(20):
         substep()
 
     colors = np.array([0x855E42, 0x068587], dtype = np.uint32)
     gui.circles(x.to_numpy() * w2s, radius = 2, color = colors[material.to_numpy()])
-
-    # target particle
-    target = 514
-    gui.circle([x[target][0] * w2s, x[target][1] * w2s], radius = 2, color = 0xFF0000)
-    for i in range(num_neighbors[target]):
-        gui.circle([x[neighbors[target, i]][0] * w2s, x[neighbors[target, i]][1] * w2s], radius = 2, color = 0xFFFF00)
 
     if frame % 10 == 0: gui.show(f'{frame // 10:06d}.png')
     else: gui.show()
