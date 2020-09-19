@@ -9,7 +9,7 @@ MAX_NUM_PARTICLES = 300512
 
 dim = 3 # dimension of the simulation
 g = ti.Vector([0.0, 0.0, -9.81]) # gravity
-alpha0 = 0.40 # viscosity
+alpha0 = 0.10 # viscosity
 rho_0 = 1000.0 # initial density of water
 CFL_v = 0.25 # CFL coefficient for velocity
 CFL_a = 0.05 # CFL coefficient for acceleration
@@ -265,8 +265,8 @@ def initialize():
             for k in range(10):
                 if ti.sqrt((i - 5.0) ** 2 + (j - 5.0) ** 2 + (k - 5.0) ** 2) <= 5.0:
                     p = ti.atomic_add(num_particles[None], 1)
-                    x[p] = [i * dx + 4 * 5e-3, j * dx + 4 * 5e-3, k * dx + 13 * 5e-3]
-                    v[p] = [0, 0, -300 * 5e-3]
+                    x[p] = [i * dx + 4 * 5e-3, j * dx + 4 * 5e-3, k * dx + 6 * 5e-3]
+                    v[p] = [0, 0, -1200 * 5e-3]
                     rho[p] = rho_0
                     P[p] = pressure(rho_0)
                     material[p] = 1
