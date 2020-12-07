@@ -11,8 +11,8 @@ class IMPLICIT_MPM:
     def __init__(self,
     category = MATERIAL_PHASE_SOLID, dim = 2, dt = 0.00004, n_particles = 5000,  n_grid = 128, gravity = 9.8, gravity_dim = 1,
     p_rho = 1.0, E = 50000, nu = 0.4,
-    newton_max_iterations = 1, newton_tolerance = 1e-2, line_search = True, linear_solve_tolerance_scale = 1,
-    linear_solve_max_iterations = 10000, linear_solve_tolerance = 1e-6,
+    newton_max_iterations = 1, newton_tolerance = 1e-2, line_search = True, line_search_max_iterations = 10, linear_solve_tolerance_scale = 1,
+    linear_solve_max_iterations = 1000, linear_solve_tolerance = 1e-6,
     cfl = 0.4, ppc = 16, 
     real = float
     ):
@@ -35,6 +35,7 @@ class IMPLICIT_MPM:
         self.newton_max_iterations = newton_max_iterations
         self.newton_tolerance = newton_tolerance
         self.line_search = line_search
+        self.line_search_max_iterations = line_search_max_iterations
         self.linear_solve_tolerance_scale = linear_solve_tolerance_scale
 
         # linear solver parameters 
@@ -389,7 +390,7 @@ class IMPLICIT_MPM:
             if (self.grid_m[I] > 0):
                 node_id = self.idx(I)
                 if ti.static(not self.ignore_collision):
-                    cond = I < self.bound or I > self.n_grid - self.bound
+                    cond = (I < self.bound and self.grid_v[I] < 0) or (I > self.n_grid - self.bound and self.grid_v[I] > 0)
                     self.dv[node_id] = 0 if cond else self.gravity * self.dt
                 else:
                     self.dv[node_id] = self.gravity * self.dt # Newton initial guess for non-collided nodes
@@ -410,6 +411,10 @@ class IMPLICIT_MPM:
         for I in ti.grouped(self.grid_m):
             if self.grid_m[I] > 0:
                 self.grid_v[I] += self.dv[self.idx(I)]
+                cond = (I < self.bound and self.grid_v[I] < 0) or (I > self.n_grid - self.bound and self.grid_v[I] > 0)
+                self.grid_v[I] = 0 if cond else self.grid_v[I]
+
+
 
     @ti.kernel
     def totalEnergy(self) -> ti.f32:
@@ -522,7 +527,7 @@ class IMPLICIT_MPM:
 
             self.scratch_vp[p] = vp
             self.scratch_gradV[p] = gradV
-        
+    
     @ti.func
     def computeStressDifferential(self, p, gradDv : ti.template(), dstress : ti.template(), dvp : ti.template()):
         Fn_local = self.old_F[p]
@@ -559,20 +564,19 @@ class IMPLICIT_MPM:
             fx = Xp - base
             w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2] # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]            
             stress = self.scratch_stress[p]
-            
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
                 weight = self.real(1)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
                 
-                b[self.idx(base + offset)] -= self.dt * self.dt * (weight * stress @ dpos)
+                b[self.idx(base + offset)] += self.dt * self.dt * (weight * stress @ dpos) # fi -= \sum_p (Ap (xi-xp)  - fp )w_ip Dp_inv
 
     @ti.func
     def project(self, x : ti.template()):
         for p in x:
             I = self.node(p)
-            cond = any(I < self.bound) or any(I > self.n_grid - self.bound)
+            cond = any(I < self.bound and self.grid_v[I] < 0) or any(I > self.n_grid - self.bound and self.grid_v[I] > 0)
             if cond: x[p] = ti.zero(x[p])
 
     @ti.kernel
@@ -599,6 +603,7 @@ class IMPLICIT_MPM:
             self.p[I] = ti.zero(self.p[I])
             self.q[I] = ti.zero(self.q[I])
             self.temp[I] = ti.zero(self.temp[I])
+            self.step_direction[I] = ti.zero(self.step_direction[I])
 
     # solve Ax = b, where A build implicitly, x := step_direction, b := redisual
     def linearSolve(self, x, b, relative_tolerance):
@@ -607,30 +612,35 @@ class IMPLICIT_MPM:
 
         # NOTE: requires that the input x has been projected
         self.multiply(x, self.temp)
+        self.scaledCopy(self.r, b, -1, self.temp)
         self.kernelProject(self.r)
         self.precondition(self.r, self.q) # NOTE: requires that preconditioning matrix is projected
         self.copy(self.p, self.q)
 
         zTrk = self.dotProduct(self.r, self.q)
+        # print('\033[1;36mzTrk = ', zTrk, '\033[0m')
         residual_preconditioned_norm = ti.sqrt(zTrk)
         local_tolerance = self.real(ti.min(relative_tolerance * residual_preconditioned_norm, self.linear_solve_tolerance))
         for cnt in range(self.linear_solve_max_iterations):
+            print ('\033[1;33mlinear_iter = ', cnt, ', residual_preconditioned_norm = ', residual_preconditioned_norm, '\033[0m')
             if residual_preconditioned_norm <= local_tolerance:
                 return cnt
 
             self.multiply(self.p, self.temp)
             self.kernelProject(self.temp)
             alpha = zTrk / self.dotProduct(self.temp, self.p)
-
-            self.copy(x, x, alpha, self.p) # i.e. x += p * alpha
-            self.copy(self.r, self.r, -alpha, self.temp) # i.e. r -= temp * alpha
+            # print ('\033[1;36malpha = ', alpha, '\033[0m')
+            self.scaledCopy(x, x, alpha, self.p) # i.e. x += p * alpha
+            self.scaledCopy(self.r, self.r, -alpha, self.temp) # i.e. r -= temp * alpha
             self.precondition(self.r, self.q) # NOTE: requires that preconditioning matrix is projected
 
             zTrk_last = zTrk
             zTrk = self.dotProduct(self.q, self.r)
+            # print('\033[1;36mzTrk = ', zTrk, '\033[0m')
             beta = zTrk / zTrk_last
+            # print('\033[1;36mbeta = ', beta, '\033[0m')
 
-            self.copy(p, q, beta, p) # i.e. p = q + beta * p
+            self.scaledCopy(self.p, self.q, beta, self.p) # i.e. p = q + beta * p
 
             residual_preconditioned_norm = ti.sqrt(zTrk)
 
@@ -660,6 +670,7 @@ class IMPLICIT_MPM:
             # -Mdv + dt * f(x_n + dt(v^n + dv)) + dt * Mg
             self.computeResidual()
             residual_norm = self.computeNorm()
+            print ('\033[1;31mnewton_iter = ', it, ', residual_norm = ', residual_norm, '\033[0m')
             if residual_norm < self.newton_tolerance:
                 break
 
@@ -667,14 +678,19 @@ class IMPLICIT_MPM:
             self.linearSolve(self.step_direction, self.residual, linear_solve_relative_tolerance)
             if ti.static(self.line_search):
                 step_size, E = self.real(1), self.real(0)
-                while True:
+                for ls_cnt in range(self.line_search_max_iterations):
                     self.scaledCopy(self.dv, self.dv0, step_size, self.step_direction)
                     self.updateState()
                     E = self.totalEnergy()
+                    print('\033[1;32m[line search]', 'E = ', E, 'E0 = ', E0, '\033[0m')
                     step_size /= 2
                     if E < E0: break
                 E0 = E
                 self.copy(self.dv0, self.dv)
+            else:
+                self.scaledCopy(self.dv, self.dv, 1, self.step_direction)
+                self.updateState()
+
 
 
     @ti.kernel
@@ -703,20 +719,19 @@ class IMPLICIT_MPM:
             self.updateIsotropicHelper(p, self.F[p])
             self.x[p] += self.dt * self.v[p]
 
-    
+    def substep(self):
+        print ('[new step]')
+        self.reinitialize()
+        self.particlesToGrid()
+        self.backwardEulerStep()
+        self.gridToParticles()
+
     @ti.kernel
     def init(self):
         for i in range(self.n_particles):
-            self.x[i] = ti.Vector([ti.random() for i in range(self.dim)]) * 0.4 + 0.15
+            self.x[i] = ti.Vector([ti.random() for i in range(self.dim)]) * 0.4 + 0.35
+            self.v[i] = ti.Vector([0, -6])
             self.F[i] = ti.Matrix.identity(self.real, self.dim)
-
-    @ti.kernel
-    def gridUpdateExplicit(self): # for test
-        for I in ti.grouped(self.grid_m):
-            self.grid_v[I] += self.dt * self.gravity
-            cond = I < self.bound and self.grid_v[I] < 0 or I > self.n_grid - self.bound and self.grid_v[I] > 0
-            self.grid_v[I] = 0 if cond else self.grid_v[I]
-
 
 if __name__ == '__main__':
     solver = IMPLICIT_MPM()
@@ -725,11 +740,7 @@ if __name__ == '__main__':
     gui = ti.GUI("Taichi IMPLICIT MPM", res = 512, background_color = 0x112F41)
     while gui.running:
         for i in range(10):
-            solver.reinitialize()
-            solver.particlesToGrid()
-            # solver.gridUpdateExplicit()
-            solver.backwardEulerStep()
-            solver.gridToParticles()
+            solver.substep()
 
         pos = solver.x.to_numpy()
         gui.circles(pos, radius=1.5, color=0x66ccff)
