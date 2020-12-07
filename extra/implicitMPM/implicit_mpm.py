@@ -14,8 +14,12 @@ class IMPLICIT_MPM:
     newton_max_iterations = 1, newton_tolerance = 1e-2, line_search = True, line_search_max_iterations = 10, linear_solve_tolerance_scale = 1,
     linear_solve_max_iterations = 1000, linear_solve_tolerance = 1e-6,
     cfl = 0.4, ppc = 16, 
-    real = float
+    real = float,
+    debug_mode = True,
+    ignore_collision = False
     ):
+        self.debug_mode = debug_mode
+
         self.category = category
         self.dim = dim
         self.dt = dt
@@ -49,8 +53,8 @@ class IMPLICIT_MPM:
         self.neighbour = (3, ) * dim
         self.bound = 3
         self.n_nodes = self.n_grid ** dim
-
-        self.ignore_collision = False
+        
+        self.ignore_collision = ignore_collision
 
         self.x = ti.Vector.field(dim, dtype = real, shape = n_particles) # position
         self.v = ti.Vector.field(dim, dtype = real, shape = n_particles) # velocity
@@ -121,7 +125,7 @@ class IMPLICIT_MPM:
         self.scratch_vp = ti.Vector.field(dim, dtype = real, shape = n_particles)
         self.scratch_gradV = ti.Matrix.field(dim, dim, dtype = real, shape = n_particles)
         self.scratch_stress = ti.Matrix.field(dim, dim, dtype = real, shape = n_particles)
-        
+
         chip_size = 16
         self.newton_data = ti.root.pointer(ti.i, [self.n_nodes // chip_size])
         self.newton_data.dense(
@@ -153,7 +157,7 @@ class IMPLICIT_MPM:
         for i in range(self.dim):
             if sigma[i, i] < 0: D[i] = 0
             else: D[i] = sigma[i, i]
-        
+
         M = sigma @ D @ sigma.transpose()
 
     @ti.func
@@ -161,7 +165,7 @@ class IMPLICIT_MPM:
         a = M[0, 0]
         b = (M[0, 1] + M[1, 0]) / 2
         d = M[1, 1]
-        
+
         b2 = b * b
         D = a * d - b2
         T_div_2 = (a + d) / 2
@@ -177,31 +181,36 @@ class IMPLICIT_MPM:
                     L1md_div_L1 = L1md / L1
                     M = ti.Matrix([[L1md_div_L1 * L1md, b * L1md_div_L1], [b * L1md_div_L1, b2 / L1]])
 
+    # [i, j]/[i, j, k] -> id
     @ti.func
     def idx(self, I):
         return sum([I[i] * self.n_grid ** i for i in range(self.dim)])
 
+    # id -> [i, j]/[i, j, k]
     @ti.func
     def node(self, p):
         return ti.Vector([(p % (self.n_grid ** (i + 1))) // (self.n_grid ** i) for i in range(self.dim)])
 
+    # target = source
     @ti.kernel
     def copy(self, target : ti.template(), source : ti.template()):
         for I in ti.grouped(source):
             target[I] = source[I]
 
+    # target = source + scale * scaled
     @ti.kernel
     def scaledCopy(self, target : ti.template(), source : ti.template(), scale : ti.f32, scaled : ti.template()):
         for I in ti.grouped(source):
             target[I] = source[I] + scale * scaled[I]
 
+    # TODO: abstract as general stress classes
     @ti.func
     def psi(self, F): # strain energy density function Ψ(F)
         U, sig, V = ti.svd(F)
         
         # fixed corotated model, you can replace it with any constitutive model
         return self.mu_0 * sum([(sig[i, i] - 1) ** 2 for i in range(self.dim)]) + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
-    
+
     @ti.func
     def dpsi_dF(self, F): # first Piola-Kirchoff stress P(F), i.e. ∂Ψ/∂F
         U, sig, V = ti.svd(F)
@@ -227,7 +236,7 @@ class IMPLICIT_MPM:
             B[2, 0] = self.B20[p][1, 0] * A[0, 2] + self.B20[p][1, 1] * A[2, 0]
             B[1, 2] = self.B12[p][0, 0] * A[1, 2] + self.B12[p][0, 1] * A[2, 1]
             B[2, 1] = self.B12[p][1, 0] * A[1, 2] + self.B12[p][1, 1] * A[2, 1]
-        
+
     @ti.func
     def firstPiolaDifferential(self, p, F, dF, dP : ti.template()):
         U, sig, V = ti.svd(F)
@@ -297,7 +306,7 @@ class IMPLICIT_MPM:
             self.B01[p] = ti.Matrix(
                 [[(self.m01[p] + self.p01[p]) * 0.5, (self.m01[p] - self.p01[p]) * 0.5], 
                  [(self.m01[p] - self.p01[p]) * 0.5, (self.m01[p] + self.p01[p]) * 0.5]])
-            
+
             # proj A
             self.makePD(self.Aij[p])
             # proj B
@@ -363,13 +372,13 @@ class IMPLICIT_MPM:
             stress = (-self.p_vol * 4 * self.inv_dx * self.inv_dx) * self.dpsi_dF(self.F[p]) @ self.F[p].transpose()
             affine = self.p_mass * self.C[p] + self.dt * stress
             # affine = self.p_mass * self.C[p]
-            
+
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
                 weight = self.real(1)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
-                
+
                 self.grid_v[base + offset] += weight * (self.p_mass * self.v[p] + affine @ dpos)
                 self.grid_m[base + offset] += weight * self.p_mass
 
@@ -433,7 +442,7 @@ class IMPLICIT_MPM:
             m = self.mass_matrix[I]
             dv = self.dv[I]
             result -= self.dt * m * self.gravity.dot(dv)
-        
+
         return result
 
     @ti.kernel
@@ -527,7 +536,7 @@ class IMPLICIT_MPM:
 
             self.scratch_vp[p] = vp
             self.scratch_gradV[p] = gradV
-    
+
     @ti.func
     def computeStressDifferential(self, p, gradDv : ti.template(), dstress : ti.template(), dvp : ti.template()):
         Fn_local = self.old_F[p]
@@ -539,7 +548,7 @@ class IMPLICIT_MPM:
     def multiply(self, x : ti.template(), b : ti.template()):
         for I in b:
             b[I] = ti.zero(b[I])
-        
+
         # Note the relationship H dx = - df, where H is the stiffness matrix
         # inertia part
         for I in x:
@@ -552,7 +561,7 @@ class IMPLICIT_MPM:
 
         for p in self.x:
             self.scratch_stress[p] = ti.zero(self.scratch_stress[p])
-        
+
         for p in self.x:
             self.computeStressDifferential(p, self.scratch_gradV[p], self.scratch_stress[p], self.scratch_vp[p])
             # scratch_stress is now V_p^0 dP (F_p^n)^T (dP is Ap in snow paper)
@@ -569,7 +578,7 @@ class IMPLICIT_MPM:
                 weight = self.real(1)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
-                
+
                 b[self.idx(base + offset)] += self.dt * self.dt * (weight * stress @ dpos) # fi -= \sum_p (Ap (xi-xp)  - fp )w_ip Dp_inv
 
     @ti.func
@@ -595,7 +604,7 @@ class IMPLICIT_MPM:
             result += a[I].dot(b[I])
 
         return result
-    
+
     @ti.kernel
     def linearSolverReinitialize(self):
         for I in self.mass_matrix:
@@ -622,7 +631,8 @@ class IMPLICIT_MPM:
         residual_preconditioned_norm = ti.sqrt(zTrk)
         local_tolerance = self.real(ti.min(relative_tolerance * residual_preconditioned_norm, self.linear_solve_tolerance))
         for cnt in range(self.linear_solve_max_iterations):
-            print ('\033[1;33mlinear_iter = ', cnt, ', residual_preconditioned_norm = ', residual_preconditioned_norm, '\033[0m')
+            if ti.static(self.debug_mode):
+                print ('\033[1;33mlinear_iter = ', cnt, ', residual_preconditioned_norm = ', residual_preconditioned_norm, '\033[0m')
             if residual_preconditioned_norm <= local_tolerance:
                 return cnt
 
@@ -646,7 +656,7 @@ class IMPLICIT_MPM:
 
         return self.linear_solve_max_iterations
 
-        
+
     def backwardEulerStep(self): # on the assumption that collision is ignored
         self.buildMassMatrix()
         self.buildInitialDvAndVnForNewton()
@@ -670,7 +680,8 @@ class IMPLICIT_MPM:
             # -Mdv + dt * f(x_n + dt(v^n + dv)) + dt * Mg
             self.computeResidual()
             residual_norm = self.computeNorm()
-            print ('\033[1;31mnewton_iter = ', it, ', residual_norm = ', residual_norm, '\033[0m')
+            if ti.static(self.debug_mode):
+                print('\033[1;31mnewton_iter = ', it, ', residual_norm = ', residual_norm, '\033[0m')
             if residual_norm < self.newton_tolerance:
                 break
 
@@ -682,7 +693,8 @@ class IMPLICIT_MPM:
                     self.scaledCopy(self.dv, self.dv0, step_size, self.step_direction)
                     self.updateState()
                     E = self.totalEnergy()
-                    print('\033[1;32m[line search]', 'E = ', E, 'E0 = ', E0, '\033[0m')
+                    if ti.static(self.debug_mode):
+                        print('\033[1;32m[line search]', 'E = ', E, 'E0 = ', E0, '\033[0m')
                     step_size /= 2
                     if E < E0: break
                 E0 = E
@@ -720,28 +732,40 @@ class IMPLICIT_MPM:
             self.x[p] += self.dt * self.v[p]
 
     def substep(self):
-        print ('[new step]')
         self.reinitialize()
         self.particlesToGrid()
         self.backwardEulerStep()
         self.gridToParticles()
 
-    @ti.kernel
-    def init(self):
-        for i in range(self.n_particles):
-            self.x[i] = ti.Vector([ti.random() for i in range(self.dim)]) * 0.4 + 0.35
-            self.v[i] = ti.Vector([0, -6])
-            self.F[i] = ti.Matrix.identity(self.real, self.dim)
+colors = ti.field(int, 5000)
+@ti.kernel
+def init(solver : ti.template()):
+    for i in range(solver.n_particles / 2):
+        solver.x[i] = ti.Vector([ti.random() for i in range(solver.dim)]) * 0.25 + 0.25
+        solver.v[i] = ti.Vector([0, -6])
+        solver.F[i] = ti.Matrix.identity(solver.real, solver.dim)
+        colors[i] = 0x66ccff
+
+    for i in range(solver.n_particles / 2, solver.n_particles):
+        solver.x[i] = ti.Vector([ti.random() for i in range(solver.dim)]) * 0.25 + [0.45, 0.65]
+        solver.v[i] = ti.Vector([0, -20])
+        solver.F[i] = ti.Matrix.identity(solver.real, solver.dim)
+        colors[i] = 0xED553B
 
 if __name__ == '__main__':
     solver = IMPLICIT_MPM()
-    solver.init()
+    init(solver)
 
-    gui = ti.GUI("Taichi IMPLICIT MPM", res = 512, background_color = 0x112F41)
+    gui = ti.GUI("Taichi IMPLICIT-MPM", res = 512, background_color = 0x112F41)
+    frame = 0
     while gui.running:
-        for i in range(10):
+        for i in range(30):
+            print ('[new step], frame = ', frame, ', substep = ', i + 1)
             solver.substep()
 
         pos = solver.x.to_numpy()
-        gui.circles(pos, radius=1.5, color=0x66ccff)
+        gui.circles(pos, radius=1.5, color=colors.to_numpy())
+        # gui.show(f'{frame:06d}.png')
         gui.show()
+
+        frame += 1
