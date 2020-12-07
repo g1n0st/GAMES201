@@ -759,7 +759,7 @@ if __name__ == '__main__':
     gui = ti.GUI("Taichi IMPLICIT-MPM", res = 512, background_color = 0x112F41)
     frame = 0
     while gui.running:
-        for i in range(30):
+        for i in range(10):
             print ('[new step], frame = ', frame, ', substep = ', i + 1)
             solver.substep()
 
