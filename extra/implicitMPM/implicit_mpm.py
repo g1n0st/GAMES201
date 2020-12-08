@@ -11,8 +11,8 @@ class IMPLICIT_MPM:
     def __init__(self,
     category = MATERIAL_PHASE_SOLID, dim = 2, dt = 0.00004, n_particles = 5000,  n_grid = 128, gravity = 9.8, gravity_dim = 1,
     p_rho = 1.0, E = 50000, nu = 0.4,
-    newton_max_iterations = 1, newton_tolerance = 1e-2, line_search = True, line_search_max_iterations = 10, linear_solve_tolerance_scale = 1,
-    linear_solve_max_iterations = 1000, linear_solve_tolerance = 1e-6,
+    newton_max_iterations = 5, newton_tolerance = 1e-5, line_search = True, line_search_max_iterations = 10, linear_solve_tolerance_scale = 1,
+    linear_solve_max_iterations = 1000, linear_solve_tolerance = 1e-30,
     cfl = 0.4, ppc = 16, 
     real = float,
     debug_mode = True,
@@ -107,7 +107,6 @@ class IMPLICIT_MPM:
         # data of Newton's method
         self.mass_matrix = ti.field(dtype = real)
         self.dv = ti.Vector.field(dim, dtype = real) # dv = v(n+1) - v(n), Newton is formed from g(dv)=0
-        self.vn = ti.Vector.field(dim, dtype = real)
         self.residual = ti.Vector.field(dim, dtype = real)
         if ti.static(line_search):
             self.dv0 = ti.Vector.field(dim, dtype = real) # dv of last iteration, for line search only
@@ -129,7 +128,7 @@ class IMPLICIT_MPM:
         chip_size = 16
         self.newton_data = ti.root.pointer(ti.i, [self.n_nodes // chip_size])
         self.newton_data.dense(
-            ti.i, chip_size).place(self.mass_matrix, self.dv, self.vn, self.residual)
+            ti.i, chip_size).place(self.mass_matrix, self.dv, self.residual)
         if ti.static(line_search):
             self.newton_data.dense(ti.i, chip_size).place(self.dv0)
 
@@ -153,10 +152,10 @@ class IMPLICIT_MPM:
     def makePD(self, M : ti.template()):
         U, sigma, V = ti.svd(M)
         if sigma[0, 0] >= 0: return
-        D = ti.Vector(self.dim, self.real)
+        D = ti.Matrix(self.dim, self.real, self.real)
         for i in range(self.dim):
-            if sigma[i, i] < 0: D[i] = 0
-            else: D[i] = sigma[i, i]
+            if sigma[i, i] < 0: D[i, i] = 0
+            else: D[i, i] = sigma[i, i]
 
         M = sigma @ D @ sigma.transpose()
 
@@ -173,7 +172,7 @@ class IMPLICIT_MPM:
         L2 = T_div_2 - sqrtTT4D
         if L2 < 0.0:
             L1 = T_div_2 + sqrtTT4D
-            if L1 < 0.0: M = ti.zero(M)
+            if L1 <= 0.0: M = ti.zero(M)
             else:
                 if b2 == 0: M = ti.Matrix([[L1, 0], [0, 0]])
                 else:
@@ -209,7 +208,7 @@ class IMPLICIT_MPM:
         U, sig, V = ti.svd(F)
         
         # fixed corotated model, you can replace it with any constitutive model
-        return self.mu_0 * sum([(sig[i, i] - 1) ** 2 for i in range(self.dim)]) + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
+        return self.mu_0 * (F - U @ V.transpose()).norm() ** 2 + self.lambda_0 / 2 * (F.determinant() - 1) ** 2
 
     @ti.func
     def dpsi_dF(self, F): # first Piola-Kirchoff stress P(F), i.e. ∂Ψ/∂F
@@ -238,12 +237,12 @@ class IMPLICIT_MPM:
             B[2, 1] = self.B12[p][1, 0] * A[1, 2] + self.B12[p][1, 1] * A[2, 1]
 
     @ti.func
-    def firstPiolaDifferential(self, p, F, dF, dP : ti.template()):
+    def firstPiolaDifferential(self, p, F, dF):
         U, sig, V = ti.svd(F)
         D = U.transpose() @ dF @ V
         K = ti.Matrix.zero(self.real, self.dim, self.dim)
         self.dPdFOfSigmaContractProjected(p, D, K)
-        dP = U @ K @ V.transpose()
+        return U @ K @ V.transpose()
 
     @ti.func
     def reinitializeIsotropicHelper(self, p):
@@ -369,13 +368,11 @@ class IMPLICIT_MPM:
             base = int(Xp - 0.5)
             fx = Xp - base
             w = [0.5 * (1.5 - fx)**2, 0.75 - (fx - 1)**2, 0.5 * (fx - 0.5)**2] # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]            
-            stress = (-self.p_vol * 4 * self.inv_dx * self.inv_dx) * self.dpsi_dF(self.F[p]) @ self.F[p].transpose()
-            affine = self.p_mass * self.C[p] + self.dt * stress
-            # affine = self.p_mass * self.C[p]
+            affine = self.p_mass * self.C[p]
 
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
-                weight = self.real(1)
+                weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
 
@@ -394,7 +391,7 @@ class IMPLICIT_MPM:
                 self.mass_matrix[self.idx(I)] = mass
 
     @ti.kernel
-    def buildInitialDvAndVnForNewton(self):
+    def buildInitialDvForNewton(self):
         for I in ti.grouped(self.grid_m):
             if (self.grid_m[I] > 0):
                 node_id = self.idx(I)
@@ -403,7 +400,6 @@ class IMPLICIT_MPM:
                     self.dv[node_id] = 0 if cond else self.gravity * self.dt
                 else:
                     self.dv[node_id] = self.gravity * self.dt # Newton initial guess for non-collided nodes
-                self.vn[node_id] = self.grid_v[I]
 
     @ti.kernel
     def backupStrain(self):
@@ -423,13 +419,11 @@ class IMPLICIT_MPM:
                 cond = (I < self.bound and self.grid_v[I] < 0) or (I > self.n_grid - self.bound and self.grid_v[I] > 0)
                 self.grid_v[I] = 0 if cond else self.grid_v[I]
 
-
-
     @ti.kernel
     def totalEnergy(self) -> ti.f32:
-        result = self.real(0)
+        result = ti.cast(0.0, self.real)
         for p in self.F:
-            result += self.psi(self.F[p]) * self.p_vol * self.F[p].determinant() # gathered from particles
+            result += self.psi(self.F[p]) * self.p_vol # gathered from particles, psi defined in the rest space
 
         # inertia part
         for I in self.dv:
@@ -441,7 +435,7 @@ class IMPLICIT_MPM:
         for I in self.dv:
             m = self.mass_matrix[I]
             dv = self.dv[I]
-            result -= self.dt * m * self.gravity.dot(dv)
+            result -= self.dt * m * dv.dot(dv) / 2
 
         return result
 
@@ -462,7 +456,7 @@ class IMPLICIT_MPM:
             new_C = ti.zero(self.C[p])
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
-                weight = 1.0
+                weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
 
@@ -474,18 +468,18 @@ class IMPLICIT_MPM:
 
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
-                weight = 1.0
+                weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
 
                 force = weight * stress @ dpos
                 self.residual[self.idx(base + offset)] += self.dt * force
 
-        self.project(self.dv)
+        self.project(self.residual)
 
     @ti.kernel
     def computeNorm(self) ->ti.f32:
-        norm_sq = self.real(0)
+        norm_sq = ti.cast(0.0, self.real)
         for I in self.dv:
             mass = self.mass_matrix[I]
             residual = self.residual[I]
@@ -504,7 +498,7 @@ class IMPLICIT_MPM:
             new_C = ti.zero(self.C[p])
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
-                weight = 1.0
+                weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
 
@@ -527,12 +521,13 @@ class IMPLICIT_MPM:
 
             for offset in ti.static(ti.grouped(ti.ndrange(*self.neighbour))):
                 dpos = (offset - fx) * self.dx
-                weight = self.real(1)
+                weight = ti.cast(1.0, self.real)
                 for i in ti.static(range(self.dim)):
                     weight *= w[offset[i]][i]
 
-                vp += weight * dv[p]
-                gradV += 4 * self.inv_dx * weight * dv[p].outer_product(dpos)
+                dv0 = dv[self.idx(base + offset)]
+                vp += weight * dv0
+                gradV += 4 * self.inv_dx * weight * dv0.outer_product(dpos)
 
             self.scratch_vp[p] = vp
             self.scratch_gradV[p] = gradV
@@ -540,9 +535,8 @@ class IMPLICIT_MPM:
     @ti.func
     def computeStressDifferential(self, p, gradDv : ti.template(), dstress : ti.template(), dvp : ti.template()):
         Fn_local = self.old_F[p]
-        dP = ti.Matrix.zero(self.real, self.dim, self.dim)
-        self.firstPiolaDifferential(p, Fn_local, gradDv @ Fn_local, dP)
-        dstress += self.p_vol * Fn_local.determinant() * dP @ Fn_local.transpose()
+        dP = self.firstPiolaDifferential(p, Fn_local, gradDv @ Fn_local)
+        dstress += self.p_vol * dP @ Fn_local.transpose()
 
     @ti.kernel
     def multiply(self, x : ti.template(), b : ti.template()):
@@ -599,7 +593,7 @@ class IMPLICIT_MPM:
 
     @ti.kernel
     def dotProduct(self, a : ti.template(), b : ti.template()) -> ti.f32:
-        result = self.real(0)
+        result = ti.cast(0.0, self.real)
         for I in a:
             result += a[I].dot(b[I])
 
@@ -620,13 +614,14 @@ class IMPLICIT_MPM:
         self.linearSolverReinitialize()
 
         # NOTE: requires that the input x has been projected
-        self.multiply(x, self.temp)
+        # self.multiply(x, self.temp)
         self.scaledCopy(self.r, b, -1, self.temp)
         self.kernelProject(self.r)
         self.precondition(self.r, self.q) # NOTE: requires that preconditioning matrix is projected
         self.copy(self.p, self.q)
 
         zTrk = self.dotProduct(self.r, self.q)
+
         # print('\033[1;36mzTrk = ', zTrk, '\033[0m')
         residual_preconditioned_norm = ti.sqrt(zTrk)
         local_tolerance = self.real(ti.min(relative_tolerance * residual_preconditioned_norm, self.linear_solve_tolerance))
@@ -639,16 +634,16 @@ class IMPLICIT_MPM:
             self.multiply(self.p, self.temp)
             self.kernelProject(self.temp)
             alpha = zTrk / self.dotProduct(self.temp, self.p)
-            # print ('\033[1;36malpha = ', alpha, '\033[0m')
+            print ('\033[1;36malpha = ', alpha, '\033[0m')
             self.scaledCopy(x, x, alpha, self.p) # i.e. x += p * alpha
             self.scaledCopy(self.r, self.r, -alpha, self.temp) # i.e. r -= temp * alpha
             self.precondition(self.r, self.q) # NOTE: requires that preconditioning matrix is projected
 
             zTrk_last = zTrk
             zTrk = self.dotProduct(self.q, self.r)
-            # print('\033[1;36mzTrk = ', zTrk, '\033[0m')
+            print('\033[1;36mzTrk = ', zTrk, '\033[0m')
             beta = zTrk / zTrk_last
-            # print('\033[1;36mbeta = ', beta, '\033[0m')
+            print('\033[1;36mbeta = ', beta, '\033[0m')
 
             self.scaledCopy(self.p, self.q, beta, self.p) # i.e. p = q + beta * p
 
@@ -659,7 +654,7 @@ class IMPLICIT_MPM:
 
     def backwardEulerStep(self): # on the assumption that collision is ignored
         self.buildMassMatrix()
-        self.buildInitialDvAndVnForNewton()
+        self.buildInitialDvForNewton()
         # Which should be called at the beginning of newton.
         self.backupStrain()
 
@@ -670,7 +665,7 @@ class IMPLICIT_MPM:
 
     def newtonSolve(self):
         self.updateState()
-        E0 = 0 # totalEnergy of last iteration, for line search only
+        E0 = 0.0 # totalEnergy of last iteration, for line search only
         if ti.static(self.line_search):
             E0 = self.totalEnergy()
             self.copy(self.dv0, self.dv)
@@ -687,8 +682,9 @@ class IMPLICIT_MPM:
 
             linear_solve_relative_tolerance = ti.min(0.5, self.linear_solve_tolerance_scale * ti.sqrt(ti.max(residual_norm, self.newton_tolerance)))
             self.linearSolve(self.step_direction, self.residual, linear_solve_relative_tolerance)
+
             if ti.static(self.line_search):
-                step_size, E = self.real(1), self.real(0)
+                step_size, E = 1.0, 0.0       
                 for ls_cnt in range(self.line_search_max_iterations):
                     self.scaledCopy(self.dv, self.dv0, step_size, self.step_direction)
                     self.updateState()
@@ -696,7 +692,7 @@ class IMPLICIT_MPM:
                     if ti.static(self.debug_mode):
                         print('\033[1;32m[line search]', 'E = ', E, 'E0 = ', E0, '\033[0m')
                     step_size /= 2
-                    if E < E0: break
+                    if E <= E0: break
                 E0 = E
                 self.copy(self.dv0, self.dv)
             else:
@@ -740,6 +736,7 @@ class IMPLICIT_MPM:
 colors = ti.field(int, 5000)
 @ti.kernel
 def init(solver : ti.template()):
+    '''
     for i in range(solver.n_particles / 2):
         solver.x[i] = ti.Vector([ti.random() for i in range(solver.dim)]) * 0.25 + 0.25
         solver.v[i] = ti.Vector([0, -6])
@@ -749,6 +746,13 @@ def init(solver : ti.template()):
     for i in range(solver.n_particles / 2, solver.n_particles):
         solver.x[i] = ti.Vector([ti.random() for i in range(solver.dim)]) * 0.25 + [0.45, 0.65]
         solver.v[i] = ti.Vector([0, -20])
+        solver.F[i] = ti.Matrix.identity(solver.real, solver.dim)
+        colors[i] = 0xED553B
+    '''
+
+    for i in range(solver.n_particles):
+        solver.x[i] = ti.Vector([ti.random() for i in range(solver.dim)]) * 0.4 + 0.35
+        solver.v[i] = ti.Vector([0, -6])
         solver.F[i] = ti.Matrix.identity(solver.real, solver.dim)
         colors[i] = 0xED553B
 
