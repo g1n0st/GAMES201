@@ -7,10 +7,9 @@ Homework2 of GAMES201 online course, this project implemented the following pape
 
 (3) C. Jiang, C. Schroeder, J. Teran, A. Stomakhin, and A. Selle. 2016. The material point method for simulating continuum materials. In SIGGRAPH Course. 24:1–24:52.
 
-
+(4) Yuanming Hu, Yu Fang, Ziheng Ge, Ziyin Qu, Yixin Zhu, Andre Pradhana, and Chenfanfu Jiang. 2018. A moving least squares material point method with displacement discontinuity and two-way rigid body coupling. ACM Trans. Graph. 37, 4, Article 150 (August 2018), 14 pages. DOI:https://doi.org/10.1145/3197517.3201293
 
 The talk of GAMES also greatly helped this work: https://v.qq.com/x/page/d0539skispz.html
-
 
 
 More details see in the Taichi Forum: https://forum.taichi.graphics/t/homework2-mpm/1137
