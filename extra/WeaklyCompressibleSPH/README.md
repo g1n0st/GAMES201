@@ -20,11 +20,11 @@ Furthermore, for improvment, this project implemented the following papers:
 
 
 
-![3D_WCSPH](Images/Houdini_1.png)
+![3D_WCSPH](Images/houdini_1.png)
 
-![3D_WCSPH](Images/Houdini_2.png)
+![3D_WCSPH](Images/houdini_2.png)
 
-![3D_WCSPH](Images/Houdini_3.png)
+![3D_WCSPH](Images/houdini_3.png)
 
 12.5k particles in offline simulation, export to `.ply`  files and rendered by Houdini.
 
