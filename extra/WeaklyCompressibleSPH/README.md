@@ -1,5 +1,5 @@
  # Weakly compressible SPH for free surface flows
-An implementation of "Weakly compressible SPH for free surface flows" in the Taichi language. `./wcsph.py` is the 2-dimension version and `./wcsph3d.py` is the 3-dimension one.
+Implementation of "Weakly compressible SPH for free surface flows" in the Taichi language. `./wcsph.py` is the 2-dimension version and `./wcsph3d.py` is the 3-dimension one.
 
 Furthermore, for improvment, this project implemented the following papers:
 
