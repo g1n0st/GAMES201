@@ -1,5 +1,5 @@
- # Implicit MPM simulator
-A dimensionality-independent implementation of implicit integrator MPM, this project implemented the following papers:
+ # Implicit MPM Simulator
+Dimensionality-independent implementation of the implicit integrator MPM simulator, this project implemented the following papers:
 
 (1) Gonzalez, O. and Stuart, A. (2008). A first course in continuum mechanics. Cambridge University Press.
 
