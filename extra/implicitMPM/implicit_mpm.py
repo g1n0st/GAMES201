@@ -151,13 +151,13 @@ class IMPLICIT_MPM:
     @ti.func
     def makePD(self, M : ti.template()):
         U, sigma, V = ti.svd(M)
-        if sigma[0, 0] >= 0: return
-        D = ti.Matrix(self.dim, self.real, self.real)
-        for i in range(self.dim):
-            if sigma[i, i] < 0: D[i, i] = 0
-            else: D[i, i] = sigma[i, i]
+        if sigma[0, 0] < 0:
+            D = ti.Matrix.zero(self.real, self.dim, self.dim)
+            for i in ti.static(range(self.dim)):
+                if sigma[i, i] < 0: D[i, i] = 0
+                else: D[i, i] = sigma[i, i]
 
-        M = sigma @ D @ sigma.transpose()
+            M = sigma @ D @ sigma.transpose()
 
     @ti.func
     def makePD2d(self, M : ti.template()):
