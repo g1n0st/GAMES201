@@ -121,8 +121,7 @@ def substep():
         grid_sf[i, j], grid_wf[i, j] = [0, 0], [0, 0]
 
     # P2G (sand's part)
-    # for p in range(n_s_particles):
-    for p in x_s:  
+    for p in range(n_s_particles[None]):
         base = (x_s[p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2:
             continue
@@ -146,8 +145,7 @@ def substep():
             grid_sf[base + offset] += weight * stress @ dpos
 
     # P2G (water's part):
-    # for p in range(n_w_particles):
-    for p in x_w:
+    for p in range(n_w_particles[None]):
         base = (x_w[p] * inv_dx - 0.5).cast(int)
         fx = x_w[p] * inv_dx - base.cast(float)
         # Quadratic kernels  [http://mpm.graphics   Eqn. 123, with x=fx, fx-1,fx-2]
@@ -215,8 +213,7 @@ def substep():
             if j > n_grid - 3 and grid_wv[i, j][1] > 0: grid_wv[i, j][1] = 0
 
     # G2P (water's part)
-    # for p in range(n_w_particles):
-    for p in x_w:
+    for p in range(n_w_particles[None]):
         base = (x_w[p] * inv_dx - 0.5).cast(int)
         fx = x_w[p] * inv_dx - base.cast(float)
         w = [0.5 * (1.5 - fx) ** 2, 0.75 - (fx - 1.0) ** 2, 0.5 * (fx - 0.5) ** 2]
@@ -233,8 +230,7 @@ def substep():
         x_w[p] += dt * v_w[p]
 
     # G2P (sand's part)
-    # for p in range(n_s_particles):
-    for p in x_s:
+    for p in range(n_s_particles[None]):
         base = (x_s[p] * inv_dx - 0.5).cast(int)
         if base[0] < 0 or base[1] < 0 or base[0] >= n_grid - 2 or base[1] >= n_grid - 2:
             continue
@@ -267,36 +263,34 @@ def substep():
 @ti.kernel
 def initialize():
     n_s_particles[None] = 10000 * quality ** 2
-    for i in x_s:
+    for i in range(n_s_particles[None]):
         x_s[i] = [ti.random() * 0.25 + 0.4, ti.random() * 0.4 + 0.01]
         v_s[i] = ti.Matrix([0, 0])
         F_s[i] = ti.Matrix([[1, 0], [0, 1]])
         c_C0[i] = -0.01
-        alpha_s[i] = 0.267765
+        alpha_s[i] = 0.067765
     pos_y[None] = 0.5
     n_w_particles[None] = 0
 
 pos_y = ti.field(dtype = float, shape = ())
 @ti.kernel
 def update_jet():
-    if n_w_particles[None] < 20000 - 50:
-        for i in range(n_w_particles[None], n_w_particles[None] + 50):
-            x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + pos_y[None]]
-            v_w[i] = ti.Matrix([-1.5, 0])
-            J_w[i] = 1
+    for i in range(n_w_particles[None], n_w_particles[None] + 50):
+        x_w[i] = [ti.random() * 0.03 + 0.92, ti.random() * 0.03 + pos_y[None]]
+        v_w[i] = ti.Matrix([-1.5, 0])
+        J_w[i] = 1
 
-        n_w_particles[None] += 50
+    n_w_particles[None] += 50
 
 # add a new sand block with mouse position
 @ti.kernel
 def add_block(x : ti.f32):
-    if n_s_particles[None] < 40000 - 1000:
-        for i in range(n_s_particles[None], n_s_particles[None] + 1000):
-            x_s[i] = [ti.min(0.87, x) + ti.random() * 0.1, ti.random() * 0.1 + 0.87]
-            v_s[i] = ti.Matrix([0, -0.25])
-            F_s[i] = ti.Matrix([[1, 0], [0, 1]])
-            c_C0[i] = -0.01
-            alpha_s[i] = 0.267765
+    for i in range(n_s_particles[None], n_s_particles[None] + 1000):
+        x_s[i] = [ti.min(0.87, x) + ti.random() * 0.1, ti.random() * 0.1 + 0.87]
+        v_s[i] = ti.Matrix([0, -0.25])
+        F_s[i] = ti.Matrix([[1, 0], [0, 1]])
+        c_C0[i] = -0.01
+        alpha_s[i] = 0.067765
 
     n_s_particles[None] += 1000
 
@@ -309,11 +303,9 @@ color_s = ti.field(dtype = int, shape = n_particles)
 color_w = ti.field(dtype = int, shape = n_particles)
 @ti.kernel
 def update_color():
-    # for i in range(n_s_particles):
-    for i in color_s:
+    for i in range(n_s_particles[None]):
         color_s[i] = color_lerp(0.521, 0.368, 0.259, 0.318, 0.223, 0.157, phi_s[i])
-    # for i in range(n_w_particles):
-    for i in color_w:
+    for i in range(n_w_particles[None]):
         color_w[i] = color_lerp(0.2, 0.231, 0.792, 0.867, 0.886, 0.886, v_w[i].norm() / 7.0)
 
 initialize()
@@ -331,11 +323,14 @@ while True:
         if e.key == gui.SPACE: project_view = not project_view
         elif e.key == 'w': pos_y[None] += 0.01 # move jet upward
         elif e.key == 's': pos_y[None] -= 0.01 # move jet downward
-        elif e.key == ti.GUI.LMB: add_block(e.pos[0])
+        elif e.key == ti.GUI.LMB: 
+            if n_s_particles[None] < 40000 - 1000:
+                add_block(e.pos[0])
         elif e.key in [ti.GUI.ESCAPE, ti.GUI.EXIT]:
             exit()
 
-    update_jet()
+    if n_w_particles[None] < 20000 - 50:
+        update_jet()
     for s in range(50):
         substep()
 
